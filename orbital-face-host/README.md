@@ -4,11 +4,16 @@ Minimal Windows-first desktop companion face host prototype using Rust, SDL3, an
 
 This project proves the face/window layer only. It does not include LLMs, voice, marketplace, agents, memory, cloud sync, or plugin security.
 
+On Linux/Wayland compositors that support `wlr-layer-shell` (including
+Hyprland), the host uses a native layer surface instead of a decorated desktop
+window. Other platforms continue to use SDL3.
+
 ## Run
 
 Requirements:
 - Rust stable
-- Windows is the primary target
+- Hyprland or another `wlr-layer-shell` compositor on Linux
+- Windows remains a target but still requires native validation
 - SDL3 is built from source through the `sdl3` crate feature in this prototype
 
 ```sh
@@ -68,6 +73,9 @@ ctx.rect(x, y, width, height, r, g, b, a)
 ## Current Status
 
 Implemented:
+- Native Wayland layer-shell surface on Hyprland
+- Transparent shared-memory rendering with no compositor window border
+- Circular Wayland input region for click-through corners
 - Borderless SDL3 window
 - Lua-driven orb animation
 - `idle`, `listening`, `thinking`, and `speaking` states
@@ -80,6 +88,10 @@ Implemented:
 - Transparent-window flag attempt
 
 Known limitations:
+- The Linux layer-shell backend requires compositor support for
+  `wlr-layer-shell`; it is not universal across all Wayland desktops.
+- Linux dragging adjusts layer-shell margins and should be considered
+  Hyprland/wlroots-specific behavior.
 - Per-pixel transparency depends on SDL3 renderer/backend and Windows compositor behavior.
 - The circular shape uses `SDL_SetWindowShape`; Windows behavior must be verified on a real desktop.
 - SDL documents fully transparent shaped pixels as click-through, but this still requires Windows verification with the selected renderer/backend.

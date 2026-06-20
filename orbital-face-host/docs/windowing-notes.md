@@ -2,11 +2,27 @@
 
 This prototype is Windows-first. Other platforms may compile later, but they are not a product target yet.
 
+## Hyprland / wlroots Wayland
+
+Status: implemented and visually verified on Hyprland.
+
+Linux uses a `wlr-layer-shell` surface with the `orbital-face-host` namespace,
+an ARGB shared-memory buffer, Overlay placement, no keyboard interactivity, and
+a circular Wayland input region. This removes the square Hyprland
+border/shadow/opacity effects that apply to normal `xdg_toplevel` windows.
+
+This requires a compositor implementing `wlr-layer-shell`. It is not expected
+to work unchanged on compositors that omit that protocol.
+
 ## Borderless Window
 
 Status: implemented through SDL3 `WindowBuilder::borderless` and `WindowFlags::BORDERLESS`.
 
 Expected Windows behavior: the window should have no normal frame or title bar.
+
+On Wayland, compositor decorations are controlled by the compositor. The app
+publishes the identifier `org.orbital.facehost` so compositor rules can remove
+borders, shadows, blur, and global opacity from this window.
 
 ## Transparent Background
 

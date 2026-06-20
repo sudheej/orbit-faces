@@ -18,6 +18,18 @@ mod windows {
 
 pub use windows::set_always_on_top;
 
+pub fn set_app_metadata() -> anyhow::Result<()> {
+    let ok = unsafe {
+        sdl3::sys::init::SDL_SetAppMetadata(
+            c"Orbital Face Host".as_ptr(),
+            c"0.1.0".as_ptr(),
+            c"org.orbital.facehost".as_ptr(),
+        )
+    };
+    anyhow::ensure!(ok, "SDL_SetAppMetadata failed: {}", sdl3::get_error());
+    Ok(())
+}
+
 pub fn set_circle_shape(
     window: &Window,
     width: u32,

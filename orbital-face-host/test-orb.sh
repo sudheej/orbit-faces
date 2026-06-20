@@ -8,7 +8,10 @@ if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
   export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-wayland}"
 fi
 
-coproc ORB { cargo run --quiet; }
+echo "Building orbital-face-host..."
+cargo build --quiet
+
+coproc ORB { exec ./target/debug/orbital-face-host; }
 orb_pid=$ORB_PID
 orb_input=${ORB[1]}
 
@@ -40,6 +43,7 @@ Orb test menu
   4) Speaking
   5) Always on top: on
   6) Always on top: off
+  7) Close face
   q) Quit
 MENU
 
@@ -51,6 +55,10 @@ MENU
     4) send_event '{"state":"speaking"}' ;;
     5) send_event '{"always_on_top":true}' ;;
     6) send_event '{"always_on_top":false}' ;;
+    7)
+      echo "Closing face..."
+      exit 0
+      ;;
     q | Q) exit 0 ;;
     *) echo "Unknown selection: $choice" ;;
   esac

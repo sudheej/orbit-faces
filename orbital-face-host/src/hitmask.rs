@@ -1,3 +1,4 @@
+#[cfg(not(target_os = "linux"))]
 use sdl3::rect::Point;
 
 #[derive(Debug, Copy, Clone)]
@@ -16,6 +17,7 @@ impl CircleHitMask {
         dx * dx + dy * dy <= self.radius * self.radius
     }
 
+    #[cfg(not(target_os = "linux"))]
     pub fn contains(self, point: Point) -> bool {
         self.contains_xy(point.x as f32, point.y as f32)
     }
