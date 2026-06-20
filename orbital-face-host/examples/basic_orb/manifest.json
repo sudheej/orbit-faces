@@ -1,0 +1,9 @@
+{
+  "name": "Basic Orb",
+  "version": "0.1.0",
+  "script": "main.lua",
+  "window": {
+    "width": 220,
+    "height": 220
+  }
+}
