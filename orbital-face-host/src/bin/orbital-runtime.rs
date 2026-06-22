@@ -1,11 +1,23 @@
+use orbital_face_host::context::active_window::{ActiveWindowProvider, SystemActiveWindowProvider};
+use orbital_face_host::context::ContextItem;
+use orbital_face_host::hotkeys::{HotkeyAction, HotkeyProvider, SystemHotkeyProvider};
 use orbital_face_host::model_provider::{
     MockModelProvider, ModelChunk, ModelProvider, ModelRequest, OllamaModelProvider,
     RuntimeModelOptions,
+};
+use orbital_face_host::quick_capture::{
+    capture_context_item, SelectionProvider, SystemSelectionProvider,
 };
 use orbital_face_host::runtime_v0::{
     parse_command, parse_face_message, CompanionState, FaceToRuntimeMessage, RuntimeCommand,
     RuntimeCore, RuntimeToFaceEvent,
 };
+use orbital_face_host::speech::audio_capture::{AudioCaptureProvider, SystemAudioCapture};
+use orbital_face_host::speech::stt::{MockSttProvider, SpeechToTextProvider, WhisperSttProvider};
+use orbital_face_host::speech::tts::{
+    NoopTtsProvider, PiperTtsProvider, TextToSpeechProvider, WindowsSapiTtsProvider,
+};
+use orbital_face_host::speech::{spoken_response, SpeechOptions, SpeechRuntimeStatus};
 use std::io::{self, BufRead};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -25,9 +37,13 @@ fn main() -> anyhow::Result<()> {
     }
     let options = RuntimeModelOptions::parse_from(std::env::args().skip(1))?;
     let provider = model_provider_from_options(&options)?;
+    let mut speech = build_speech_services(&options.speech)?;
     let bridge = RuntimeBridge::start(ADDRESS)?;
     let terminal = spawn_terminal_reader();
     let mut runtime = RuntimeCore::default();
+    runtime.selection_capture_supported = SystemSelectionProvider.supported();
+    runtime.active_window_supported = SystemActiveWindowProvider.supported();
+    let hotkeys = start_hotkeys(&options, &mut runtime);
 
     println!("Orbital Runtime v0");
     println!("Bridge listening on {BRIDGE_URL}");
@@ -35,12 +51,26 @@ fn main() -> anyhow::Result<()> {
     println!("Type a message and press Enter.");
     println!(
         "Commands: /quit, /status, /model, /clear, /context, /clear-context, \
-         /clipboard, /active-window, /watch, /unwatch, /attach-text, /attach-file, /demo, /ping"
+         /clipboard, /active-window, /watch, /unwatch, /attach-text, /attach-file, \
+         /selection, /ask, /ask-selection, /ask-selection-once, /listen, \
+         /transcribe-file, /say, /speech-status, /demo, /ping"
     );
 
     loop {
         while let Some(update) = bridge.try_recv() {
             handle_bridge_update(&bridge, &mut runtime, update);
+        }
+        if let Some(hotkeys) = &hotkeys {
+            while let Ok(action) = hotkeys.try_recv() {
+                handle_hotkey_action(
+                    &bridge,
+                    &mut runtime,
+                    provider.as_ref(),
+                    &options.system_prompt,
+                    &mut speech,
+                    action,
+                );
+            }
         }
 
         match terminal.try_recv() {
@@ -50,6 +80,7 @@ fn main() -> anyhow::Result<()> {
                     &mut runtime,
                     provider.as_ref(),
                     &options.system_prompt,
+                    &mut speech,
                     parse_command(&line),
                 ) {
                     break;
@@ -77,11 +108,50 @@ fn model_provider_from_options(
     }
 }
 
+struct SpeechServices {
+    stt: Box<dyn SpeechToTextProvider>,
+    tts: Box<dyn TextToSpeechProvider>,
+    audio: SystemAudioCapture,
+    options: SpeechOptions,
+    status: SpeechRuntimeStatus,
+}
+
+fn build_speech_services(options: &SpeechOptions) -> anyhow::Result<SpeechServices> {
+    let stt: Box<dyn SpeechToTextProvider> = match options.stt.as_str() {
+        "mock" => Box::new(MockSttProvider),
+        "whisper" => Box::new(WhisperSttProvider::new(
+            options.whisper_bin.clone(),
+            options.whisper_model_path.clone(),
+        )?),
+        _ => unreachable!("STT provider was validated"),
+    };
+    let tts: Box<dyn TextToSpeechProvider> = match options.tts.as_str() {
+        "none" => Box::new(NoopTtsProvider),
+        "piper" => Box::new(PiperTtsProvider::new(
+            options.piper_bin.clone(),
+            options.piper_model.clone(),
+            options.piper_config.clone(),
+        )?),
+        "windows-sapi" => Box::new(WindowsSapiTtsProvider),
+        _ => unreachable!("TTS provider was validated"),
+    };
+    Ok(SpeechServices {
+        stt,
+        tts,
+        audio: SystemAudioCapture,
+        options: options.clone(),
+        status: SpeechRuntimeStatus::default(),
+    })
+}
+
 fn print_help() {
     println!(
         "Usage: orbital-runtime [--model mock|ollama] \
          [--ollama-model <name>] [--ollama-base-url <url>] \
-         [--system-prompt <text>]"
+         [--system-prompt <text>] [--enable-hotkeys] \
+         [--stt mock|whisper] [--whisper-model-path <path>] [--whisper-bin <path>] \
+         [--tts none|piper|windows-sapi] [--piper-bin <path>] \
+         [--piper-model <path>] [--piper-config <path>] [--speak-responses]"
     );
 }
 
@@ -102,16 +172,73 @@ fn print_provider_startup(provider: &dyn ModelProvider) {
     }
 }
 
+fn start_hotkeys(
+    options: &RuntimeModelOptions,
+    runtime: &mut RuntimeCore,
+) -> Option<Receiver<HotkeyAction>> {
+    if !options.enable_hotkeys {
+        return None;
+    }
+    match SystemHotkeyProvider.start() {
+        Ok(receiver) => {
+            runtime.hotkeys_enabled = true;
+            println!("Global hotkeys registered:");
+            println!("  Ctrl+Alt+O: show runtime status");
+            println!("  Ctrl+Alt+S: capture selected text");
+            println!("  Ctrl+Alt+A: ask about selected text");
+            println!("  Ctrl+Alt+L: listen for 5 seconds");
+            Some(receiver)
+        }
+        Err(error) => {
+            runtime.hotkeys_enabled = false;
+            eprintln!("Global hotkeys unavailable; continuing without them: {error:#}");
+            None
+        }
+    }
+}
+
+fn handle_hotkey_action(
+    bridge: &RuntimeBridge,
+    runtime: &mut RuntimeCore,
+    model: &dyn ModelProvider,
+    system_prompt: &str,
+    speech: &mut SpeechServices,
+    action: HotkeyAction,
+) {
+    match action {
+        HotkeyAction::ShowStatus => {
+            println!("Orbital ready for terminal input.");
+            print_status(runtime, model, speech);
+        }
+        HotkeyAction::CaptureSelection => {
+            capture_selection(bridge, runtime, &SystemSelectionProvider);
+        }
+        HotkeyAction::AskSelectionDefault => ask_selection(
+            bridge,
+            runtime,
+            model,
+            system_prompt,
+            speech,
+            "Explain this selected text briefly.".into(),
+            true,
+        ),
+        HotkeyAction::ListenFiveSeconds => {
+            listen_and_ask(bridge, runtime, model, system_prompt, speech, 5)
+        }
+    }
+}
+
 fn handle_command(
     bridge: &RuntimeBridge,
     runtime: &mut RuntimeCore,
     provider: &dyn ModelProvider,
     system_prompt: &str,
+    speech: &mut SpeechServices,
     command: RuntimeCommand,
 ) -> bool {
     match command {
         RuntimeCommand::Quit => return false,
-        RuntimeCommand::Status => print_status(runtime, provider),
+        RuntimeCommand::Status => print_status(runtime, provider, speech),
         RuntimeCommand::Model => print_model_status(runtime, provider),
         RuntimeCommand::Clear => {
             runtime.conversation.clear();
@@ -133,6 +260,45 @@ fn handle_command(
         }
         RuntimeCommand::AttachText(text) => attach_text(bridge, runtime, text),
         RuntimeCommand::AttachFile(path) => attach_file(bridge, runtime, &path),
+        RuntimeCommand::Selection => {
+            capture_selection(bridge, runtime, &SystemSelectionProvider);
+        }
+        RuntimeCommand::Ask(question) => {
+            let question = default_question(question, "What should I help with?");
+            run_prompt(
+                bridge,
+                runtime,
+                provider,
+                system_prompt,
+                speech,
+                question,
+                None,
+            );
+        }
+        RuntimeCommand::AskSelection(question) => ask_selection(
+            bridge,
+            runtime,
+            provider,
+            system_prompt,
+            speech,
+            question,
+            true,
+        ),
+        RuntimeCommand::AskSelectionOnce(question) => ask_selection(
+            bridge,
+            runtime,
+            provider,
+            system_prompt,
+            speech,
+            question,
+            false,
+        ),
+        RuntimeCommand::Listen(seconds) => {
+            listen_and_ask(bridge, runtime, provider, system_prompt, speech, seconds)
+        }
+        RuntimeCommand::TranscribeFile(path) => transcribe_file(bridge, runtime, speech, &path),
+        RuntimeCommand::Say(text) => say_text(bridge, runtime, speech, &text),
+        RuntimeCommand::SpeechStatus => print_speech_status(speech),
         RuntimeCommand::Demo => run_demo(bridge, runtime),
         RuntimeCommand::Ping => {
             let id = format!(
@@ -145,9 +311,15 @@ fn handle_command(
             println!("Sending ping {id}");
             send_event(bridge, runtime, RuntimeToFaceEvent::Ping { id });
         }
-        RuntimeCommand::Prompt(input) => {
-            run_prompt(bridge, runtime, provider, system_prompt, input)
-        }
+        RuntimeCommand::Prompt(input) => run_prompt(
+            bridge,
+            runtime,
+            provider,
+            system_prompt,
+            speech,
+            input,
+            None,
+        ),
         RuntimeCommand::Empty => {}
         RuntimeCommand::Unknown(command) => {
             eprintln!(
@@ -163,7 +335,9 @@ fn run_prompt(
     runtime: &mut RuntimeCore,
     provider: &dyn ModelProvider,
     system_prompt: &str,
+    speech: &mut SpeechServices,
     input: String,
+    temporary_context: Option<ContextItem>,
 ) {
     println!("User: {input}");
     runtime.last_user_input = Some(input.clone());
@@ -180,7 +354,10 @@ fn run_prompt(
         None,
     );
 
-    let prompt_context = runtime.context.prompt_context();
+    let prompt_context = temporary_context
+        .as_ref()
+        .map(|item| runtime.context.prompt_context_with(item))
+        .unwrap_or_else(|| runtime.context.prompt_context());
     let context_item_count = prompt_context.items.len();
     let request = ModelRequest {
         user_input: input.clone(),
@@ -234,6 +411,14 @@ fn run_prompt(
                     Some(0.6),
                 );
             }
+            if speech.options.speak_responses && speech.tts.enabled() {
+                let spoken = spoken_response(&response.text, 500);
+                if let Err(error) = speech.tts.speak(&spoken) {
+                    let message = format!("{error:#}");
+                    eprintln!("TTS warning: {message}");
+                    speech.status.last_error = Some(message);
+                }
+            }
             send_state(bridge, runtime, CompanionState::Idle, "Ready", None);
         }
         Err(error) => {
@@ -251,6 +436,98 @@ fn run_prompt(
             }
             thread::sleep(Duration::from_millis(900));
             send_state(bridge, runtime, CompanionState::Idle, "Ready", None);
+        }
+    }
+}
+
+fn default_question(question: String, fallback: &str) -> String {
+    if question.trim().is_empty() {
+        fallback.into()
+    } else {
+        question
+    }
+}
+
+fn capture_selection(
+    bridge: &RuntimeBridge,
+    runtime: &mut RuntimeCore,
+    provider: &dyn SelectionProvider,
+) -> Option<ContextItem> {
+    send_state(
+        bridge,
+        runtime,
+        CompanionState::Thinking,
+        "Capturing selection...",
+        None,
+    );
+    match capture_context_item(provider, &mut runtime.context, true) {
+        Ok((capture, item)) => {
+            if let Some(warning) = capture.warning {
+                eprintln!("Selection capture warning: {warning}");
+            }
+            runtime.last_capture_result = Some(format!(
+                "captured {} characters; clipboard restored: {}",
+                item.size_chars, capture.clipboard_restored
+            ));
+            println!(
+                "Selection attached: {} characters from {}",
+                item.size_chars, item.source
+            );
+            context_success(bridge, runtime, "Selection attached");
+            Some(item)
+        }
+        Err(error) => {
+            runtime.last_capture_result = Some(format!("failed: {error:#}"));
+            context_failure(bridge, runtime, "No selection found", error);
+            None
+        }
+    }
+}
+
+fn ask_selection(
+    bridge: &RuntimeBridge,
+    runtime: &mut RuntimeCore,
+    model: &dyn ModelProvider,
+    system_prompt: &str,
+    speech: &mut SpeechServices,
+    question: String,
+    persist: bool,
+) {
+    let question = default_question(question, "Explain this selected text briefly.");
+    send_state(
+        bridge,
+        runtime,
+        CompanionState::Thinking,
+        "Capturing selection...",
+        None,
+    );
+    match capture_context_item(&SystemSelectionProvider, &mut runtime.context, persist) {
+        Ok((capture, item)) => {
+            if let Some(warning) = capture.warning {
+                eprintln!("Selection capture warning: {warning}");
+            }
+            runtime.last_capture_result = Some(format!(
+                "captured {} characters; clipboard restored: {}",
+                item.size_chars, capture.clipboard_restored
+            ));
+            println!(
+                "Selection captured: {} characters from {}",
+                item.size_chars, item.source
+            );
+            let temporary = (!persist).then_some(item);
+            run_prompt(
+                bridge,
+                runtime,
+                model,
+                system_prompt,
+                speech,
+                question,
+                temporary,
+            );
+        }
+        Err(error) => {
+            runtime.last_capture_result = Some(format!("failed: {error:#}"));
+            context_failure(bridge, runtime, "No selection found", error);
         }
     }
 }
@@ -284,7 +561,17 @@ fn capture_active_window(bridge: &RuntimeBridge, runtime: &mut RuntimeCore) {
         Ok(window) => {
             println!("Active window:");
             println!("  title: {}", window.title);
-            println!("  process: {}", window.process);
+            println!(
+                "  process: {}",
+                window.process_name.as_deref().unwrap_or("unknown")
+            );
+            println!(
+                "  pid: {}",
+                window
+                    .process_id
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "unknown".into())
+            );
             context_success(bridge, runtime, "Window context attached");
         }
         Err(error) => context_failure(bridge, runtime, "Window info unavailable", error),
@@ -301,9 +588,10 @@ fn start_watch(bridge: &RuntimeBridge, runtime: &mut RuntimeCore) {
     );
     match runtime.context.start_watch() {
         Ok(window) => {
+            let process = window.process_name.as_deref().unwrap_or("unknown");
             println!(
                 "Watching active-window metadata: {} ({})",
-                window.title, window.process
+                window.title, process
             );
             context_success(bridge, runtime, "Watching window metadata");
         }
@@ -371,7 +659,17 @@ fn print_context(runtime: &RuntimeCore) {
     }
     if let Some(window) = runtime.context.active_window() {
         println!("  active title: {}", window.title);
-        println!("  active process: {}", window.process);
+        println!(
+            "  active process: {}",
+            window.process_name.as_deref().unwrap_or("unknown")
+        );
+        println!(
+            "  active pid: {}",
+            window
+                .process_id
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "unknown".into())
+        );
     }
     for item in runtime.context.items() {
         println!(
@@ -382,6 +680,160 @@ fn print_context(runtime: &RuntimeCore) {
             item.source
         );
     }
+}
+
+fn listen_and_ask(
+    bridge: &RuntimeBridge,
+    runtime: &mut RuntimeCore,
+    model: &dyn ModelProvider,
+    system_prompt: &str,
+    speech: &mut SpeechServices,
+    seconds: u64,
+) {
+    send_state(
+        bridge,
+        runtime,
+        CompanionState::Listening,
+        "Listening...",
+        None,
+    );
+    let wav_path = temporary_audio_path("listen");
+    let result = if speech.stt.requires_audio_capture() {
+        speech
+            .audio
+            .capture_wav(seconds, &wav_path)
+            .and_then(|_| transcribe_path(bridge, runtime, speech, &wav_path))
+    } else {
+        transcribe_path(bridge, runtime, speech, &wav_path)
+    };
+    let _ = std::fs::remove_file(&wav_path);
+
+    match result {
+        Ok(transcript) => {
+            println!("Transcript: {transcript}");
+            run_prompt(
+                bridge,
+                runtime,
+                model,
+                system_prompt,
+                speech,
+                transcript,
+                None,
+            );
+        }
+        Err(error) => speech_failure(bridge, runtime, speech, error),
+    }
+}
+
+fn transcribe_file(
+    bridge: &RuntimeBridge,
+    runtime: &mut RuntimeCore,
+    speech: &mut SpeechServices,
+    path: &str,
+) {
+    if path.trim().is_empty() {
+        speech_failure(
+            bridge,
+            runtime,
+            speech,
+            anyhow::anyhow!("/transcribe-file requires a WAV path"),
+        );
+        return;
+    }
+    match transcribe_path(bridge, runtime, speech, Path::new(path)) {
+        Ok(transcript) => println!("Transcript: {transcript}"),
+        Err(error) => speech_failure(bridge, runtime, speech, error),
+    }
+}
+
+fn transcribe_path(
+    bridge: &RuntimeBridge,
+    runtime: &mut RuntimeCore,
+    speech: &mut SpeechServices,
+    path: &Path,
+) -> anyhow::Result<String> {
+    send_state(
+        bridge,
+        runtime,
+        CompanionState::Thinking,
+        "Transcribing...",
+        None,
+    );
+    let transcription = speech.stt.transcribe_wav(path)?;
+    speech.status.last_transcription = Some(transcription.text.clone());
+    speech.status.last_error = None;
+    println!(
+        "STT [{} / {} ms]: {}",
+        transcription.provider, transcription.elapsed_ms, transcription.text
+    );
+    send_state(bridge, runtime, CompanionState::Idle, "Ready", None);
+    Ok(transcription.text)
+}
+
+fn say_text(
+    bridge: &RuntimeBridge,
+    runtime: &mut RuntimeCore,
+    speech: &mut SpeechServices,
+    text: &str,
+) {
+    if text.trim().is_empty() {
+        speech_failure(
+            bridge,
+            runtime,
+            speech,
+            anyhow::anyhow!("/say requires text"),
+        );
+        return;
+    }
+    if !speech.tts.enabled() {
+        println!("TTS is disabled. Start runtime with --tts piper or --tts windows-sapi.");
+        return;
+    }
+    send_state(
+        bridge,
+        runtime,
+        CompanionState::Speaking,
+        &compact_caption(text, 72),
+        Some(0.6),
+    );
+    match speech.tts.speak(text) {
+        Ok(()) => {
+            speech.status.last_error = None;
+            send_state(bridge, runtime, CompanionState::Idle, "Ready", None);
+        }
+        Err(error) => speech_failure(bridge, runtime, speech, error),
+    }
+}
+
+fn speech_failure(
+    bridge: &RuntimeBridge,
+    runtime: &mut RuntimeCore,
+    speech: &mut SpeechServices,
+    error: anyhow::Error,
+) {
+    let message = format!("{error:#}");
+    eprintln!("Speech error: {message}");
+    speech.status.last_error = Some(message);
+    send_state(
+        bridge,
+        runtime,
+        CompanionState::Error,
+        "Speech failed",
+        None,
+    );
+    thread::sleep(Duration::from_millis(700));
+    send_state(bridge, runtime, CompanionState::Idle, "Ready", None);
+}
+
+fn temporary_audio_path(prefix: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "orbital-{prefix}-{}-{}.wav",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    ))
 }
 
 fn run_demo(bridge: &RuntimeBridge, runtime: &mut RuntimeCore) {
@@ -497,7 +949,7 @@ fn log_face_message(message: &FaceToRuntimeMessage) {
     }
 }
 
-fn print_status(runtime: &RuntimeCore, provider: &dyn ModelProvider) {
+fn print_status(runtime: &RuntimeCore, provider: &dyn ModelProvider, speech: &SpeechServices) {
     println!("Runtime status:");
     println!("  state: {:?}", runtime.state);
     println!("  provider: {}", provider.name());
@@ -531,12 +983,40 @@ fn print_status(runtime: &RuntimeCore, provider: &dyn ModelProvider) {
     println!("  context items: {}", runtime.context.item_count());
     println!("  watching: {}", runtime.context.watch_mode());
     if let Some(window) = runtime.context.active_window() {
-        println!("  active window: {} ({})", window.title, window.process);
+        println!(
+            "  active window: {} ({})",
+            window.title,
+            window.process_name.as_deref().unwrap_or("unknown")
+        );
     }
     println!(
         "  last model error: {}",
         runtime.last_model_error.as_deref().unwrap_or("-")
     );
+    print!("{}", quick_capture_status(runtime));
+    print!("{}", speech_status_text(speech));
+}
+
+fn quick_capture_status(runtime: &RuntimeCore) -> String {
+    let mut output = format!(
+        "  hotkeys enabled: {}\n  selection capture supported: {}\n  active window supported: {}\n  last capture result: {}\n",
+        runtime.hotkeys_enabled,
+        runtime.selection_capture_supported,
+        runtime.active_window_supported,
+        runtime.last_capture_result.as_deref().unwrap_or("-")
+    );
+    if let Some(window) = runtime.context.active_window() {
+        output.push_str(&format!(
+            "  last active window: {} ({}) pid={}\n",
+            window.title,
+            window.process_name.as_deref().unwrap_or("unknown"),
+            window
+                .process_id
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "unknown".into())
+        ));
+    }
+    output
 }
 
 fn print_model_status(runtime: &RuntimeCore, provider: &dyn ModelProvider) {
@@ -559,6 +1039,39 @@ fn print_model_status(runtime: &RuntimeCore, provider: &dyn ModelProvider) {
     if provider.name() == "ollama" {
         println!("  pull command: ollama pull {}", provider.model_name());
     }
+}
+
+fn print_speech_status(speech: &SpeechServices) {
+    print!("{}", speech_status_text(speech));
+}
+
+fn speech_status_text(speech: &SpeechServices) -> String {
+    format!(
+        "Speech status:\n  STT provider: {}\n  TTS provider: {}\n  Whisper model: {}\n  Piper binary: {}\n  Piper model: {}\n  speak responses: {}\n  microphone capture supported: {}\n  last transcription: {}\n  last speech error: {}\n",
+        speech.stt.name(),
+        speech.tts.name(),
+        speech
+            .stt
+            .model_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "-".into()),
+        speech
+            .options
+            .piper_bin
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "-".into()),
+        speech
+            .options
+            .piper_model
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "-".into()),
+        speech.options.speak_responses,
+        speech.audio.supported(),
+        speech.status.last_transcription.as_deref().unwrap_or("-"),
+        speech.status.last_error.as_deref().unwrap_or("-")
+    )
 }
 
 fn print_ollama_guidance(provider: &dyn ModelProvider) {
@@ -691,10 +1204,31 @@ fn serve_connection(
 
 #[cfg(test)]
 mod tests {
-    use super::compact_caption;
+    use super::{build_speech_services, compact_caption, quick_capture_status, speech_status_text};
+    use orbital_face_host::runtime_v0::RuntimeCore;
+    use orbital_face_host::speech::SpeechOptions;
 
     #[test]
     fn compact_caption_keeps_recent_text() {
         assert_eq!(compact_caption("one two three four", 8), "ree four");
+    }
+
+    #[test]
+    fn status_includes_quick_capture_indicators() {
+        let runtime = RuntimeCore::default();
+        let status = quick_capture_status(&runtime);
+        assert!(status.contains("hotkeys enabled: false"));
+        assert!(status.contains("selection capture supported:"));
+        assert!(status.contains("active window supported:"));
+        assert!(status.contains("last capture result: -"));
+    }
+
+    #[test]
+    fn speech_status_formats_default_providers() {
+        let speech = build_speech_services(&SpeechOptions::default()).unwrap();
+        let status = speech_status_text(&speech);
+        assert!(status.contains("STT provider: mock"));
+        assert!(status.contains("TTS provider: none"));
+        assert!(status.contains("speak responses: false"));
     }
 }

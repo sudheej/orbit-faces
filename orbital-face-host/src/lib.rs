@@ -1,5 +1,8 @@
 pub mod bridge;
 pub mod context;
 pub mod events;
+pub mod hotkeys;
 pub mod model_provider;
+pub mod quick_capture;
 pub mod runtime_v0;
+pub mod speech;

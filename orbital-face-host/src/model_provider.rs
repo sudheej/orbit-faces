@@ -1,3 +1,4 @@
+use crate::speech::SpeechOptions;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
@@ -13,6 +14,8 @@ pub struct RuntimeModelOptions {
     pub ollama_model: String,
     pub ollama_base_url: String,
     pub system_prompt: String,
+    pub enable_hotkeys: bool,
+    pub speech: SpeechOptions,
 }
 
 impl Default for RuntimeModelOptions {
@@ -22,6 +25,8 @@ impl Default for RuntimeModelOptions {
             ollama_model: DEFAULT_OLLAMA_MODEL.into(),
             ollama_base_url: DEFAULT_OLLAMA_BASE_URL.into(),
             system_prompt: DEFAULT_SYSTEM_PROMPT.into(),
+            enable_hotkeys: false,
+            speech: SpeechOptions::default(),
         }
     }
 }
@@ -56,6 +61,51 @@ impl RuntimeModelOptions {
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("--system-prompt requires text"))?;
                 }
+                "--enable-hotkeys" => options.enable_hotkeys = true,
+                "--stt" => {
+                    options.speech.stt = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("--stt requires mock or whisper"))?;
+                }
+                "--whisper-model-path" => {
+                    options.speech.whisper_model_path =
+                        Some(args.next().map(Into::into).ok_or_else(|| {
+                            anyhow::anyhow!("--whisper-model-path requires a path")
+                        })?);
+                }
+                "--whisper-bin" => {
+                    options.speech.whisper_bin = args
+                        .next()
+                        .map(Into::into)
+                        .ok_or_else(|| anyhow::anyhow!("--whisper-bin requires a path"))?;
+                }
+                "--tts" => {
+                    options.speech.tts = args.next().ok_or_else(|| {
+                        anyhow::anyhow!("--tts requires none, piper, or windows-sapi")
+                    })?;
+                }
+                "--piper-bin" => {
+                    options.speech.piper_bin = Some(
+                        args.next()
+                            .map(Into::into)
+                            .ok_or_else(|| anyhow::anyhow!("--piper-bin requires a path"))?,
+                    );
+                }
+                "--piper-model" => {
+                    options.speech.piper_model = Some(
+                        args.next()
+                            .map(Into::into)
+                            .ok_or_else(|| anyhow::anyhow!("--piper-model requires a path"))?,
+                    );
+                }
+                "--piper-config" => {
+                    options.speech.piper_config = Some(
+                        args.next()
+                            .map(Into::into)
+                            .ok_or_else(|| anyhow::anyhow!("--piper-config requires a path"))?,
+                    );
+                }
+                "--speak-responses" => options.speech.speak_responses = true,
                 _ => anyhow::bail!("unknown argument {argument:?}; use --help for usage"),
             }
         }
@@ -63,6 +113,19 @@ impl RuntimeModelOptions {
             matches!(options.provider.as_str(), "mock" | "ollama"),
             "unknown model provider {:?}; available: mock, ollama",
             options.provider
+        );
+        anyhow::ensure!(
+            matches!(options.speech.stt.as_str(), "mock" | "whisper"),
+            "unknown STT provider {:?}; available: mock, whisper",
+            options.speech.stt
+        );
+        anyhow::ensure!(
+            matches!(
+                options.speech.tts.as_str(),
+                "none" | "piper" | "windows-sapi"
+            ),
+            "unknown TTS provider {:?}; available: none, piper, windows-sapi",
+            options.speech.tts
         );
         Ok(options)
     }
@@ -153,7 +216,17 @@ impl ModelProvider for MockModelProvider {
         let started = Instant::now();
         let normalized = request.user_input.to_ascii_lowercase();
         let context_count = request.context_item_count;
-        let text = if context_count > 0 {
+        let selected_count = request
+            .prompt_context
+            .as_deref()
+            .map(|context| context.matches("Type: selected_text").count())
+            .unwrap_or(0);
+        let text = if selected_count > 0 {
+            let preview = selected_text_preview(request.prompt_context.as_deref().unwrap_or(""));
+            format!(
+                "I used {selected_count} selected_text context item(s). The selected text appears to be related to: {preview}"
+            )
+        } else if context_count > 0 {
             format!(
                 "I used {context_count} attached context item(s) to answer: {}",
                 request.user_input
@@ -188,6 +261,24 @@ impl ModelProvider for MockModelProvider {
             elapsed_ms: started.elapsed().as_millis() as u64,
             error: None,
         })
+    }
+}
+
+fn selected_text_preview(context: &str) -> String {
+    let content = context
+        .split("Type: selected_text")
+        .nth(1)
+        .and_then(|section| section.split("Content:\n").nth(1))
+        .unwrap_or("selected content");
+    let preview = content
+        .split_whitespace()
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if preview.is_empty() {
+        "selected content".into()
+    } else {
+        preview
     }
 }
 
@@ -527,6 +618,9 @@ mod tests {
         let options = RuntimeModelOptions::parse_from(Vec::<String>::new()).unwrap();
         assert_eq!(options.provider, "mock");
         assert_eq!(options.ollama_model, "qwen2.5:1.5b");
+        assert!(!options.enable_hotkeys);
+        assert_eq!(options.speech.stt, "mock");
+        assert_eq!(options.speech.tts, "none");
     }
 
     #[test]
@@ -540,11 +634,44 @@ mod tests {
             "http://127.0.0.1:11434",
             "--system-prompt",
             "Be brief.",
+            "--enable-hotkeys",
+            "--stt",
+            "whisper",
+            "--whisper-model-path",
+            "./tiny.bin",
+            "--tts",
+            "piper",
+            "--piper-bin",
+            "./piper",
+            "--piper-model",
+            "./voice.onnx",
+            "--speak-responses",
         ])
         .unwrap();
         assert_eq!(options.provider, "ollama");
         assert_eq!(options.ollama_model, "qwen2.5-coder:1.5b");
         assert_eq!(options.ollama_base_url, "http://127.0.0.1:11434");
         assert_eq!(options.system_prompt, "Be brief.");
+        assert!(options.enable_hotkeys);
+        assert_eq!(options.speech.stt, "whisper");
+        assert_eq!(
+            options.speech.whisper_model_path.as_deref(),
+            Some(std::path::Path::new("./tiny.bin"))
+        );
+        assert_eq!(options.speech.tts, "piper");
+        assert!(options.speech.speak_responses);
+    }
+
+    #[test]
+    fn mock_provider_identifies_selected_text_context() {
+        let mut request = request("explain this");
+        request.prompt_context = Some(
+            "[Orbital Context]\nContext item 1:\nType: selected_text\nTitle: Selected Text\nContent:\nmissing class Foo"
+                .into(),
+        );
+        request.context_item_count = 1;
+        let response = MockModelProvider.generate(request).unwrap();
+        assert!(response.text.contains("1 selected_text context item"));
+        assert!(response.text.contains("missing class Foo"));
     }
 }

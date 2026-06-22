@@ -44,6 +44,14 @@ pub enum RuntimeCommand {
     Unwatch,
     AttachText(String),
     AttachFile(String),
+    Selection,
+    Ask(String),
+    AskSelection(String),
+    AskSelectionOnce(String),
+    Listen(u64),
+    TranscribeFile(String),
+    Say(String),
+    SpeechStatus,
     Prompt(String),
     Empty,
     Unknown(String),
@@ -56,6 +64,26 @@ pub fn parse_command(line: &str) -> RuntimeCommand {
     }
     if let Some(path) = input.strip_prefix("/attach-file ") {
         return RuntimeCommand::AttachFile(path.trim().to_owned());
+    }
+    if let Some(question) = input.strip_prefix("/ask-selection-once ") {
+        return RuntimeCommand::AskSelectionOnce(question.trim().to_owned());
+    }
+    if let Some(question) = input.strip_prefix("/ask-selection ") {
+        return RuntimeCommand::AskSelection(question.trim().to_owned());
+    }
+    if let Some(question) = input.strip_prefix("/ask ") {
+        return RuntimeCommand::Ask(question.trim().to_owned());
+    }
+    if let Some(path) = input.strip_prefix("/transcribe-file ") {
+        return RuntimeCommand::TranscribeFile(path.trim().to_owned());
+    }
+    if let Some(text) = input.strip_prefix("/say ") {
+        return RuntimeCommand::Say(text.trim().to_owned());
+    }
+    if let Some(seconds) = input.strip_prefix("/listen ") {
+        return parse_listen_seconds(seconds)
+            .map(RuntimeCommand::Listen)
+            .unwrap_or_else(|_| RuntimeCommand::Unknown(input.to_owned()));
     }
     match input {
         "" => RuntimeCommand::Empty,
@@ -73,9 +101,29 @@ pub fn parse_command(line: &str) -> RuntimeCommand {
         "/unwatch" => RuntimeCommand::Unwatch,
         "/attach-text" => RuntimeCommand::AttachText(String::new()),
         "/attach-file" => RuntimeCommand::AttachFile(String::new()),
+        "/selection" => RuntimeCommand::Selection,
+        "/ask" => RuntimeCommand::Ask(String::new()),
+        "/ask-selection" => RuntimeCommand::AskSelection(String::new()),
+        "/ask-selection-once" => RuntimeCommand::AskSelectionOnce(String::new()),
+        "/listen" => RuntimeCommand::Listen(5),
+        "/transcribe-file" => RuntimeCommand::TranscribeFile(String::new()),
+        "/say" => RuntimeCommand::Say(String::new()),
+        "/speech-status" => RuntimeCommand::SpeechStatus,
         command if command.starts_with('/') => RuntimeCommand::Unknown(command.to_owned()),
         prompt => RuntimeCommand::Prompt(prompt.to_owned()),
     }
+}
+
+pub fn parse_listen_seconds(value: &str) -> anyhow::Result<u64> {
+    let seconds = value
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("listen seconds must be a number from 1 to 20"))?;
+    anyhow::ensure!(
+        (1..=20).contains(&seconds),
+        "listen seconds must be between 1 and 20"
+    );
+    Ok(seconds)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -209,6 +257,10 @@ pub struct RuntimeCore {
     pub conversation: ConversationHistory,
     pub context: ContextManager,
     pub last_model_error: Option<String>,
+    pub hotkeys_enabled: bool,
+    pub selection_capture_supported: bool,
+    pub active_window_supported: bool,
+    pub last_capture_result: Option<String>,
     suppress_next_toggle_action: bool,
 }
 
@@ -226,6 +278,10 @@ impl Default for RuntimeCore {
             conversation: ConversationHistory::new(6),
             context: ContextManager::default(),
             last_model_error: None,
+            hotkeys_enabled: false,
+            selection_capture_supported: cfg!(windows),
+            active_window_supported: cfg!(windows),
+            last_capture_result: None,
             suppress_next_toggle_action: false,
         }
     }
@@ -487,6 +543,47 @@ mod tests {
     }
 
     #[test]
+    fn parses_quick_capture_commands() {
+        assert_eq!(parse_command("/selection"), RuntimeCommand::Selection);
+        assert_eq!(
+            parse_command("/ask explain this"),
+            RuntimeCommand::Ask("explain this".into())
+        );
+        assert_eq!(
+            parse_command("/ask-selection why failing?"),
+            RuntimeCommand::AskSelection("why failing?".into())
+        );
+        assert_eq!(
+            parse_command("/ask-selection-once summarize"),
+            RuntimeCommand::AskSelectionOnce("summarize".into())
+        );
+    }
+
+    #[test]
+    fn parses_speech_commands_and_listen_bounds() {
+        assert_eq!(parse_command("/listen"), RuntimeCommand::Listen(5));
+        assert_eq!(parse_command("/listen 12"), RuntimeCommand::Listen(12));
+        assert!(matches!(
+            parse_command("/listen 21"),
+            RuntimeCommand::Unknown(_)
+        ));
+        assert_eq!(
+            parse_command("/transcribe-file ./sample.wav"),
+            RuntimeCommand::TranscribeFile("./sample.wav".into())
+        );
+        assert_eq!(
+            parse_command("/say Hello Orbital"),
+            RuntimeCommand::Say("Hello Orbital".into())
+        );
+        assert_eq!(
+            parse_command("/speech-status"),
+            RuntimeCommand::SpeechStatus
+        );
+        assert!(parse_listen_seconds("0").is_err());
+        assert!(parse_listen_seconds("20").is_ok());
+    }
+
+    #[test]
     fn conversation_history_trims_old_exchanges() {
         let mut history = ConversationHistory::new(2);
         history.add_exchange("u1", "a1");
@@ -517,6 +614,30 @@ mod tests {
         assert!(matches!(
             event,
             RuntimeToFaceEvent::State { ref state, .. } if state == "error"
+        ));
+    }
+
+    #[test]
+    fn speech_face_states_use_existing_protocol() {
+        let mut runtime = RuntimeCore::default();
+        let listening =
+            runtime.state_event(CompanionState::Listening, Some("Listening...".into()), None);
+        assert!(matches!(
+            listening,
+            RuntimeToFaceEvent::State { ref state, .. } if state == "listening"
+        ));
+        let speaking = runtime.state_event(
+            CompanionState::Speaking,
+            Some("Voice response".into()),
+            Some(0.6),
+        );
+        assert!(matches!(
+            speaking,
+            RuntimeToFaceEvent::State {
+                ref state,
+                audio_level: Some(level),
+                ..
+            } if state == "speaking" && level == 0.6
         ));
     }
 }

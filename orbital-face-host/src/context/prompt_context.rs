@@ -104,4 +104,19 @@ mod tests {
         assert!(prompt.formatted.chars().count() <= 120);
         assert!(prompt.formatted.contains("[Context truncated]"));
     }
+
+    #[test]
+    fn selected_text_format_includes_title_and_source() {
+        let item = ContextItem::new(
+            "selection-1",
+            ContextKind::SelectedText,
+            "Selected Text",
+            "missing class Foo",
+            "Code.exe - main.rs",
+        );
+        let prompt = PromptContext::from_items(&[item], 1_000);
+        assert!(prompt.formatted.contains("Type: selected_text"));
+        assert!(prompt.formatted.contains("Title: Selected Text"));
+        assert!(prompt.formatted.contains("Source: Code.exe - main.rs"));
+    }
 }

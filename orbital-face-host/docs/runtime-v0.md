@@ -40,6 +40,14 @@ can connect to the same server and sends a new `face.ready` event.
 - `/watch` and `/unwatch`: enable or disable prompt-time window metadata
   refresh.
 - `/attach-text <text>` and `/attach-file <path>`: attach manual context.
+- `/selection`: attach the current Windows text selection.
+- `/ask <question>`: explicit form of a normal context-aware prompt.
+- `/ask-selection <question>`: capture a selection and ask immediately.
+- `/ask-selection-once <question>`: use the selection for one request only.
+- `/listen [seconds]`: explicitly record and transcribe one bounded utterance.
+- `/transcribe-file <path>`: transcribe a WAV without asking the model.
+- `/say <text>`: invoke the selected TTS provider.
+- `/speech-status`: print speech provider configuration and recent results.
 - `/demo`: run `idle -> listening -> thinking -> speaking -> happy -> idle`.
 - `/ping`: send a JSON protocol ping and log the matching pong.
 - `/quit`: stop the runtime.
@@ -68,6 +76,12 @@ streaming captions, history, diagnostics, and limitations.
 
 See [context-v0.md](context-v0.md) for explicit clipboard, attachment, and
 Windows active-window context behavior.
+
+See [quick-capture-v0.md](quick-capture-v0.md) for Windows selection capture,
+clipboard preservation, and optional global hotkeys.
+
+See [speech-io-v0.md](speech-io-v0.md) for explicit microphone capture,
+whisper.cpp, Piper, Windows SAPI, and privacy limits.
 
 ## Interaction behavior
 

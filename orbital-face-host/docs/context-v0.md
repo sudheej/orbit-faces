@@ -45,6 +45,9 @@ what window am I working in?
 /unwatch
 ```
 
+Selected text is handled by Quick Capture. See
+[quick-capture-v0.md](quick-capture-v0.md).
+
 ## Clipboard privacy
 
 Clipboard access occurs only when `/clipboard` is entered. Orbital reads text
@@ -57,6 +60,7 @@ Active-window support is Windows-first. It records only:
 
 - foreground window title;
 - foreground process executable name.
+- foreground process ID.
 
 It does not capture pixels, OCR text, keystrokes, file contents, or application
 documents. Watch mode does not run a background polling loop; after `/watch`,

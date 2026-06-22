@@ -24,6 +24,10 @@
 11. `context/` owns explicit clipboard snapshots, bounded text/file
     attachments, Windows active-window metadata, watch state, and prompt
     context formatting.
+12. `quick_capture.rs` isolates selected-text capture and clipboard
+    preservation; `hotkeys.rs` isolates optional Windows global shortcuts.
+13. `speech/` isolates bounded CPAL microphone capture, mock/whisper.cpp STT,
+    and none/Piper/Windows-SAPI TTS providers.
 
 ## Boundaries
 

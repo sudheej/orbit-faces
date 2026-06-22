@@ -3,7 +3,9 @@ pub mod attachments;
 pub mod clipboard;
 pub mod prompt_context;
 
-use crate::context::active_window::ActiveWindowInfo;
+use crate::context::active_window::{
+    ActiveWindowInfo, ActiveWindowProvider, SystemActiveWindowProvider,
+};
 use crate::context::prompt_context::PromptContext;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,6 +18,7 @@ pub enum ContextKind {
     ActiveWindow,
     AttachedText,
     AttachedFile,
+    SelectedText,
     WatchTarget,
 }
 
@@ -26,6 +29,7 @@ impl ContextKind {
             Self::ActiveWindow => "active_window",
             Self::AttachedText => "attached_text",
             Self::AttachedFile => "attached_file",
+            Self::SelectedText => "selected_text",
             Self::WatchTarget => "watch_target",
         }
     }
@@ -107,6 +111,11 @@ impl ContextManager {
         self.active_window.as_ref()
     }
 
+    pub fn note_active_window(&mut self, window: ActiveWindowInfo) {
+        self.active_window = Some(window);
+        self.last_context_refresh_at = Some(now_timestamp());
+    }
+
     pub fn last_context_refresh_at(&self) -> Option<u64> {
         self.last_context_refresh_at
     }
@@ -160,7 +169,14 @@ impl ContextManager {
     }
 
     pub fn capture_active_window(&mut self) -> anyhow::Result<&ActiveWindowInfo> {
-        let window = active_window::collect()?;
+        self.capture_active_window_with(&SystemActiveWindowProvider)
+    }
+
+    pub fn capture_active_window_with(
+        &mut self,
+        provider: &dyn ActiveWindowProvider,
+    ) -> anyhow::Result<&ActiveWindowInfo> {
+        let window = provider.get_active_window()?;
         self.store_active_window(window, ContextKind::ActiveWindow);
         Ok(self
             .active_window
@@ -169,7 +185,14 @@ impl ContextManager {
     }
 
     pub fn start_watch(&mut self) -> anyhow::Result<&ActiveWindowInfo> {
-        let window = active_window::collect()?;
+        self.start_watch_with(&SystemActiveWindowProvider)
+    }
+
+    pub fn start_watch_with(
+        &mut self,
+        provider: &dyn ActiveWindowProvider,
+    ) -> anyhow::Result<&ActiveWindowInfo> {
+        let window = provider.get_active_window()?;
         self.watch_mode = true;
         self.store_active_window(window, ContextKind::WatchTarget);
         Ok(self
@@ -186,10 +209,17 @@ impl ContextManager {
     }
 
     pub fn refresh_watch(&mut self) -> anyhow::Result<()> {
+        self.refresh_watch_with(&SystemActiveWindowProvider)
+    }
+
+    pub fn refresh_watch_with(
+        &mut self,
+        provider: &dyn ActiveWindowProvider,
+    ) -> anyhow::Result<()> {
         if !self.watch_mode {
             return Ok(());
         }
-        let window = active_window::collect()?;
+        let window = provider.get_active_window()?;
         self.store_active_window(window, ContextKind::WatchTarget);
         Ok(())
     }
@@ -198,10 +228,56 @@ impl ContextManager {
         PromptContext::from_items(&self.items, self.max_prompt_chars)
     }
 
+    pub fn prompt_context_with(&self, extra: &ContextItem) -> PromptContext {
+        let mut items = self.items.clone();
+        items.push(extra.clone());
+        PromptContext::from_items(&items, self.max_prompt_chars)
+    }
+
+    pub fn attach_selected_text(
+        &mut self,
+        text: impl Into<String>,
+        source: impl Into<String>,
+    ) -> anyhow::Result<&ContextItem> {
+        let text = text.into();
+        anyhow::ensure!(!text.trim().is_empty(), "selected text must not be empty");
+        let id = self.next_id("selection");
+        self.items.push(ContextItem::new(
+            id,
+            ContextKind::SelectedText,
+            "Selected Text",
+            text,
+            source,
+        ));
+        self.last_context_refresh_at = Some(now_timestamp());
+        Ok(self.items.last().expect("item was just inserted"))
+    }
+
+    pub fn selected_text_item(
+        &mut self,
+        text: impl Into<String>,
+        source: impl Into<String>,
+    ) -> anyhow::Result<ContextItem> {
+        let text = text.into();
+        anyhow::ensure!(!text.trim().is_empty(), "selected text must not be empty");
+        Ok(ContextItem::new(
+            self.next_id("selection-once"),
+            ContextKind::SelectedText,
+            "Selected Text",
+            text,
+            source,
+        ))
+    }
+
     fn store_active_window(&mut self, window: ActiveWindowInfo, kind: ContextKind) {
+        let process = window.process_name.as_deref().unwrap_or("unknown");
+        let pid = window
+            .process_id
+            .map(|pid| pid.to_string())
+            .unwrap_or_else(|| "unknown".into());
         let content = format!(
-            "Window title: {}\nProcess: {}",
-            window.title, window.process
+            "Window title: {}\nProcess: {}\nPID: {}\nPlatform: {}",
+            window.title, process, pid, window.platform
         );
         let id = match kind {
             ContextKind::WatchTarget => "watch-target",
@@ -222,7 +298,7 @@ impl ContextManager {
                 "Active Window"
             },
             content,
-            window.process.clone(),
+            process,
         ));
         self.active_window = Some(window);
         self.last_context_refresh_at = Some(now_timestamp());
@@ -285,5 +361,42 @@ mod tests {
         };
         manager.stop_watch();
         assert!(!manager.watch_mode());
+    }
+
+    struct FakeWindowProvider;
+
+    impl ActiveWindowProvider for FakeWindowProvider {
+        fn get_active_window(&self) -> anyhow::Result<ActiveWindowInfo> {
+            Ok(ActiveWindowInfo {
+                title: "main.rs".into(),
+                process_name: Some("Code.exe".into()),
+                process_id: Some(42),
+                platform: "test".into(),
+            })
+        }
+
+        fn supported(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn active_window_provider_is_injectable() {
+        let mut manager = ContextManager::default();
+        let window = manager
+            .capture_active_window_with(&FakeWindowProvider)
+            .unwrap();
+        assert_eq!(window.process_id, Some(42));
+        assert!(manager.items()[0].content.contains("PID: 42"));
+    }
+
+    #[test]
+    fn selected_text_context_item_is_created() {
+        let mut manager = ContextManager::default();
+        let item = manager
+            .attach_selected_text("selected error", "Code.exe - main.rs")
+            .unwrap();
+        assert_eq!(item.kind, ContextKind::SelectedText);
+        assert_eq!(item.title, "Selected Text");
     }
 }

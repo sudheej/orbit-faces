@@ -122,6 +122,82 @@ Clipboard is read only on `/clipboard`; watch mode tracks title/process
 metadata only and captures no screenshots. See
 [docs/context-v0.md](docs/context-v0.md) for privacy behavior and limits.
 
+### Windows quick capture
+
+Start the runtime with optional global hotkeys:
+
+```sh
+cargo run --bin orbital-runtime -- \
+  --model ollama \
+  --ollama-model qwen2.5:1.5b \
+  --enable-hotkeys
+```
+
+Then select an error in VS Code, a terminal, or another Windows application and
+press `Ctrl+Alt+A`. The equivalent runtime command is:
+
+```text
+/ask-selection explain this error
+```
+
+Orbital captures the selection explicitly, preserves existing text clipboard
+content when possible, adds foreground title/process/PID metadata, and sends
+the question to the local model. Mock mode supports the same flow:
+
+```sh
+cargo run --bin orbital-runtime -- --model mock --enable-hotkeys
+```
+
+Use `/ask-selection-once` for one-request-only selection context. See
+[docs/quick-capture-v0.md](docs/quick-capture-v0.md) for hotkeys, clipboard
+preservation, privacy behavior, and Windows limitations.
+
+### Explicit speech I/O
+
+Mock speech flow, with no microphone or speakers:
+
+```sh
+cargo run --bin orbital-runtime -- --model mock --stt mock --tts none
+```
+
+```text
+/listen 5
+```
+
+Whisper.cpp flow:
+
+```sh
+cargo run --bin orbital-runtime -- \
+  --model ollama \
+  --ollama-model qwen2.5:1.5b \
+  --stt whisper \
+  --whisper-bin ./whisper.cpp/build/bin/whisper-cli \
+  --whisper-model-path ./models/ggml-tiny.en.bin \
+  --tts none
+```
+
+TTS examples:
+
+```sh
+cargo run --bin orbital-runtime -- --tts windows-sapi
+```
+
+```text
+/say Hello, I am Orbital.
+```
+
+Or:
+
+```sh
+cargo run --bin orbital-runtime -- \
+  --tts piper \
+  --piper-bin ./piper \
+  --piper-model ./voices/en_US-lessac-medium.onnx
+```
+
+Speech is push-to-talk only. There is no wake word or background microphone
+monitoring. See [docs/speech-io-v0.md](docs/speech-io-v0.md).
+
 ## Running with mock runtime
 
 Terminal 1:
