@@ -1,3 +1,4 @@
+use crate::face_pack::FaceWindow;
 use crate::hitmask::CircleHitMask;
 use crate::platform;
 use anyhow::Context;
@@ -18,16 +19,33 @@ struct DragState {
     window_start_y: i32,
 }
 
-pub fn create(sdl: &sdl3::Sdl, width: u32, height: u32) -> anyhow::Result<HostWindow> {
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum DragOutcome {
+    Click,
+    Dragged { x: i32, y: i32 },
+}
+
+pub fn create(sdl: &sdl3::Sdl, settings: &FaceWindow) -> anyhow::Result<HostWindow> {
+    let width = settings.width;
+    let height = settings.height;
     let video = sdl
         .video()
         .context("failed to initialize SDL video subsystem")?;
 
     let mut builder = video.window("orbital-face-host", width, height);
-    builder
-        .position_centered()
-        .borderless()
-        .set_flags(WindowFlags::BORDERLESS | WindowFlags::TRANSPARENT | WindowFlags::NOT_FOCUSABLE);
+    builder.position_centered();
+    let mut flags = WindowFlags::NOT_FOCUSABLE;
+    if settings.borderless {
+        builder.borderless();
+        flags |= WindowFlags::BORDERLESS;
+    }
+    if settings.transparent {
+        flags |= WindowFlags::TRANSPARENT;
+    }
+    if settings.always_on_top {
+        flags |= WindowFlags::ALWAYS_ON_TOP;
+    }
+    builder.set_flags(flags);
 
     let mut window = builder.build().context("failed to build SDL window")?;
     let _ = window.set_opacity(1.0);
@@ -37,8 +55,10 @@ pub fn create(sdl: &sdl3::Sdl, width: u32, height: u32) -> anyhow::Result<HostWi
         height,
         radius: width.min(height) as f32 * 0.44,
     };
-    if let Err(err) = platform::set_circle_shape(&window, width, height, hit_mask.radius) {
-        eprintln!("SDL window shape setup failed: {err}");
+    if settings.transparent {
+        if let Err(err) = platform::set_circle_shape(&window, width, height, hit_mask.radius) {
+            eprintln!("SDL window shape setup failed: {err}");
+        }
     }
 
     let callback_hit_mask = hit_mask;
@@ -62,9 +82,9 @@ pub fn create(sdl: &sdl3::Sdl, width: u32, height: u32) -> anyhow::Result<HostWi
 }
 
 impl HostWindow {
-    pub fn begin_drag(&mut self, mouse_x: f32, mouse_y: f32) {
+    pub fn begin_drag(&mut self, mouse_x: f32, mouse_y: f32) -> bool {
         if !self.hit_mask.contains_xy(mouse_x, mouse_y) {
-            return;
+            return false;
         }
 
         let (window_start_x, window_start_y) = self.canvas.window().position();
@@ -74,6 +94,7 @@ impl HostWindow {
             window_start_x,
             window_start_y,
         });
+        true
     }
 
     pub fn drag_to(&mut self, mouse_x: f32, mouse_y: f32) {
@@ -89,7 +110,13 @@ impl HostWindow {
         );
     }
 
-    pub fn end_drag(&mut self) {
-        self.dragging = None;
+    pub fn end_drag(&mut self) -> Option<DragOutcome> {
+        let dragging = self.dragging.take()?;
+        let (x, y) = self.canvas.window().position();
+        if x == dragging.window_start_x && y == dragging.window_start_y {
+            Some(DragOutcome::Click)
+        } else {
+            Some(DragOutcome::Dragged { x, y })
+        }
     }
 }

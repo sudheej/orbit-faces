@@ -1,11 +1,11 @@
 {
   "kind": "orbital.face",
   "version": "0.1",
-  "name": "Basic Orb",
+  "name": "Pixel Pet",
   "entry": "main.lua",
   "window": {
-    "width": 260,
-    "height": 260,
+    "width": 240,
+    "height": 240,
     "transparent": true,
     "borderless": true,
     "always_on_top": false

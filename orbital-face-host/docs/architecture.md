@@ -1,36 +1,36 @@
 # Architecture
 
-`orbital-face-host` is intentionally small. It is a face/window runtime, not the future companion backend.
+`orbital-face-host` is a face runtime, not a companion backend.
 
-## Runtime Flow
+## Runtime flow
 
-1. `main.rs` chooses a face package directory.
-2. `lua_host.rs` reads `manifest.json` and loads `main.lua`.
-3. `window.rs` creates a small SDL3 borderless window.
-4. `events.rs` reads JSON lines from stdin on a background thread.
-5. `app.rs` runs the SDL event loop, forwards state changes to Lua, and renders Lua draw commands.
-6. `renderer.rs` draws a tiny immediate-mode command list to SDL.
+1. `main.rs` parses `--face` and the optional local `--bridge` URL.
+2. `face_pack.rs` loads and validates `manifest.json` and the entry script.
+3. `runtime.rs` owns the current state, Lua host, debug overlay, FPS, and safe
+   callback handling.
+4. `events.rs` parses shared bridge messages and backward-compatible stdin
+   JSON lines.
+5. `lua_host.rs` exposes lifecycle callbacks and the constrained drawing API.
+6. `renderer.rs` executes the shared draw-command list.
+7. `wayland_app.rs` hosts the Linux layer-shell surface; `app.rs` and
+   `window.rs` contain the SDL3 platform path.
+8. `bridge.rs` runs the reconnecting WebSocket worker used by the face host;
+   `orbital-runtime-mock` provides the local test server.
+9. `runtime_v0.rs` contains the backend state machine, protocol parser, command
+   parser, and model-provider boundary used by the interactive
+   `orbital-runtime` binary.
+10. `model_provider.rs` isolates deterministic mock generation and optional
+    Ollama `/api/chat` and `/api/tags` HTTP calls.
+11. `context/` owns explicit clipboard snapshots, bounded text/file
+    attachments, Windows active-window metadata, watch state, and prompt
+    context formatting.
 
-## Lua Boundary
+## Boundaries
 
-Lua scripts own visual behavior only. They receive state, time, and a constrained drawing context. They do not own the app backend, IO, network, tools, voice, or agents.
+Face scripts receive state and draw. They do not own IO, networking, tools,
+voice, agents, or application lifecycle. The bridge remains a host-level
+transport.
 
-Expected callbacks:
-
-```lua
-function companion.load()
-end
-
-function companion.state_changed(state)
-end
-
-function companion.update(dt)
-end
-
-function companion.draw(ctx)
-end
-```
-
-## Platform Boundary
-
-`src/platform` is reserved for platform-specific experiments. Unsafe code and native APIs should stay there instead of leaking into the app loop or renderer.
+Windowing is platform-specific because transparent click-through, focus,
+positioning, and stacking are not portable desktop concepts. Drawing, face
+packs, Lua, and events remain shared.

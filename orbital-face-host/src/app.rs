@@ -1,12 +1,14 @@
-use crate::events::{self, FaceEvent, FaceState};
-use crate::lua_host::LuaHost;
+use crate::bridge::{BridgeHandle, BridgeUpdate, FaceToRuntimeEvent};
+use crate::events::{self, FaceEvent, RuntimeMessage};
+use crate::face_pack::{FacePack, LaunchOptions};
 use crate::platform;
 use crate::renderer::{self, DrawCommand};
-use crate::window::{self, HostWindow};
+use crate::runtime::FaceRuntime;
+use crate::window::{self, DragOutcome, HostWindow};
 use anyhow::Context;
 use sdl3::event::Event;
 use sdl3::keyboard::Keycode;
-use std::path::PathBuf;
+use sdl3::mouse::MouseButton;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
@@ -15,32 +17,36 @@ const FRAME_TIME: Duration = Duration::from_millis(16);
 pub struct App {
     sdl: sdl3::Sdl,
     host_window: HostWindow,
-    lua_host: LuaHost,
+    runtime: FaceRuntime,
     stdin_events: Receiver<FaceEvent>,
-    state: FaceState,
-    always_on_top: bool,
+    bridge: Option<BridgeHandle>,
 }
 
 impl App {
-    pub fn new(face_dir: PathBuf) -> anyhow::Result<Self> {
-        let manifest_path = face_dir.join("manifest.json");
-        let manifest = LuaHost::read_manifest(&manifest_path)
-            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-
+    pub fn new(options: LaunchOptions) -> anyhow::Result<Self> {
+        let pack = FacePack::load(options.face_dir)?;
         let sdl = sdl3::init().context("failed to initialize SDL3")?;
-        let host_window = window::create(&sdl, manifest.window.width, manifest.window.height)
+        let host_window = window::create(&sdl, &pack.manifest.window)
             .context("failed to create SDL3 host window")?;
-        let lua_host = LuaHost::load(face_dir.join(&manifest.script))
-            .context("failed to load Lua face script")?;
+        let mut runtime = FaceRuntime::load(pack, "trans:try shape:sdl click:try")?;
         let stdin_events = events::spawn_stdin_reader();
+        let bridge = options.bridge_url.map(|url| {
+            runtime.enable_bridge_mode();
+            BridgeHandle::connect(
+                url,
+                FaceToRuntimeEvent::Ready {
+                    face: runtime.pack.manifest.name.clone(),
+                    version: runtime.pack.manifest.version.clone(),
+                },
+            )
+        });
 
         Ok(Self {
             sdl,
             host_window,
-            lua_host,
+            runtime,
             stdin_events,
-            state: FaceState::Idle,
-            always_on_top: false,
+            bridge,
         })
     }
 
@@ -51,8 +57,6 @@ impl App {
             .context("failed to create SDL event pump")?;
         let start = Instant::now();
         let mut last_tick = start;
-
-        self.lua_host.call_load()?;
 
         'running: loop {
             let now = Instant::now();
@@ -67,42 +71,124 @@ impl App {
                         ..
                     } => break 'running,
                     Event::KeyDown {
-                        keycode: Some(Keycode::T),
+                        keycode: Some(Keycode::A),
                         ..
                     } => self.toggle_always_on_top(),
-                    Event::MouseButtonDown { x, y, .. } => self.host_window.begin_drag(x, y),
-                    Event::MouseButtonUp { .. } => self.host_window.end_drag(),
+                    Event::KeyDown {
+                        keycode: Some(Keycode::D),
+                        ..
+                    } => self.runtime.debug = !self.runtime.debug,
+                    Event::MouseButtonDown {
+                        mouse_btn: MouseButton::Left,
+                        x,
+                        y,
+                        ..
+                    } => {
+                        self.host_window.begin_drag(x, y);
+                    }
+                    Event::MouseButtonUp {
+                        mouse_btn: MouseButton::Left,
+                        clicks,
+                        x,
+                        y,
+                        ..
+                    } => self.finish_pointer_interaction(x, y, clicks),
                     Event::MouseMotion { x, y, .. } => self.host_window.drag_to(x, y),
                     _ => {}
                 }
             }
 
             while let Ok(face_event) = self.stdin_events.try_recv() {
-                match face_event {
-                    FaceEvent::StateChanged(next_state) => {
-                        self.state = next_state;
-                        self.lua_host.call_state_changed(self.state)?;
-                    }
-                    FaceEvent::AlwaysOnTopChanged(enabled) => {
-                        self.set_always_on_top(enabled);
-                    }
-                }
+                self.apply_face_event(face_event);
+            }
+            while let Some(update) = self
+                .bridge
+                .as_ref()
+                .and_then(|bridge| bridge.try_recv().ok())
+            {
+                self.apply_bridge_update(update);
             }
 
-            self.lua_host.call_update(dt)?;
             let commands = self
-                .lua_host
-                .draw(self.state, start.elapsed().as_secs_f32())?;
+                .runtime
+                .update_and_draw(dt, start.elapsed().as_secs_f32());
             self.render(commands);
-
             std::thread::sleep(FRAME_TIME);
         }
 
         Ok(())
     }
 
+    fn apply_face_event(&mut self, event: FaceEvent) {
+        match event {
+            FaceEvent::State(state_event) => self.runtime.change_state(state_event),
+            FaceEvent::Config {
+                always_on_top,
+                debug_overlay,
+            } => {
+                if let Some(enabled) = always_on_top {
+                    self.set_always_on_top(enabled);
+                }
+                if let Some(enabled) = debug_overlay {
+                    self.runtime.debug = enabled;
+                }
+            }
+        }
+    }
+
+    fn apply_bridge_update(&mut self, update: BridgeUpdate) {
+        match update {
+            BridgeUpdate::Connected => self.runtime.set_bridge_connected(true),
+            BridgeUpdate::Disconnected => self.runtime.set_bridge_connected(false),
+            BridgeUpdate::Sent(event_type) => self.runtime.record_sent_event(event_type),
+            BridgeUpdate::Received(message) => match message {
+                RuntimeMessage::Event { event_type, event } => {
+                    self.runtime.record_received_event(event_type);
+                    self.apply_face_event(event);
+                }
+                RuntimeMessage::Ping { .. } => self.runtime.record_received_event("ping"),
+                RuntimeMessage::Unknown { event_type } => {
+                    eprintln!("warning: ignored unknown bridge message type {event_type:?}");
+                    self.runtime.record_received_event(event_type);
+                }
+            },
+        }
+    }
+
+    fn finish_pointer_interaction(&mut self, x: f32, y: f32, clicks: u8) {
+        match self.host_window.end_drag() {
+            Some(DragOutcome::Click) => {
+                self.send_bridge_event(FaceToRuntimeEvent::Clicked {
+                    x,
+                    y,
+                    button: "left".into(),
+                });
+                if clicks >= 2 {
+                    self.send_bridge_event(FaceToRuntimeEvent::DoubleClicked {
+                        x,
+                        y,
+                        button: "left".into(),
+                    });
+                    self.send_bridge_event(FaceToRuntimeEvent::Action {
+                        action: "toggle_listening".into(),
+                    });
+                }
+            }
+            Some(DragOutcome::Dragged { x, y }) => {
+                self.send_bridge_event(FaceToRuntimeEvent::Dragged { x, y });
+            }
+            None => {}
+        }
+    }
+
+    fn send_bridge_event(&self, event: FaceToRuntimeEvent) {
+        if let Some(bridge) = &self.bridge {
+            bridge.send(event);
+        }
+    }
+
     fn toggle_always_on_top(&mut self) {
-        self.set_always_on_top(!self.always_on_top);
+        self.set_always_on_top(!self.runtime.always_on_top);
     }
 
     fn set_always_on_top(&mut self, enabled: bool) {
@@ -110,7 +196,7 @@ impl App {
             eprintln!("always-on-top toggle failed: {err}");
             return;
         }
-        self.always_on_top = enabled;
+        self.runtime.always_on_top = enabled;
     }
 
     fn render(&mut self, commands: Vec<DrawCommand>) {

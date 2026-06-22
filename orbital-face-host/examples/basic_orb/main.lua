@@ -2,13 +2,17 @@ companion = {}
 
 local state = "idle"
 local pulse = 0
+local width = 260
+local height = 260
 
-function companion.load()
+function companion.load(ctx)
+  width = ctx.width
+  height = ctx.height
   state = "idle"
 end
 
-function companion.state_changed(next_state)
-  state = next_state
+function companion.state_changed(event)
+  state = event.state
 end
 
 function companion.update(dt)
@@ -16,9 +20,9 @@ function companion.update(dt)
 end
 
 function companion.draw(ctx)
-  local cx = 110
-  local cy = 110
-  local base_radius = 72
+  local cx = width * 0.5
+  local cy = height * 0.5
+  local base_radius = 84
   local wobble = math.sin(ctx.time * 3.0) * 4
 
   local outer = { 70, 160, 255, 220 }
@@ -37,6 +41,18 @@ function companion.draw(ctx)
     outer = { 255, 180, 70, 235 }
     inner = { 255, 230, 145, 255 }
     wobble = math.sin(ctx.time * 10.0) * 6
+  elseif state == "happy" then
+    outer = { 255, 105, 180, 235 }
+    inner = { 255, 190, 220, 255 }
+    wobble = math.sin(ctx.time * 6.0) * 7
+  elseif state == "error" then
+    outer = { 235, 55, 70, 240 }
+    inner = { 255, 150, 145, 255 }
+    wobble = math.sin(ctx.time * 14.0) * 4
+  elseif state == "sleeping" then
+    outer = { 65, 85, 145, 210 }
+    inner = { 125, 145, 205, 230 }
+    wobble = math.sin(ctx.time * 1.5) * 2
   end
 
   ctx.clear(0, 0, 0, 0)
@@ -60,4 +76,11 @@ function companion.draw(ctx)
   else
     ctx.circle(cx, cy + 46, 15, 255, 255, 255, 160)
   end
+end
+
+function companion.hit_test(x, y)
+  local dx = x - width * 0.5
+  local dy = y - height * 0.5
+  local radius = math.min(width, height) * 0.44
+  return dx * dx + dy * dy <= radius * radius
 end

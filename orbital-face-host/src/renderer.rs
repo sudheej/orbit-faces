@@ -1,3 +1,4 @@
+use font8x8::UnicodeFonts;
 #[cfg(not(target_os = "linux"))]
 use sdl3::pixels::Color;
 #[cfg(not(target_os = "linux"))]
@@ -17,6 +18,12 @@ pub enum DrawCommand {
         y: f32,
         width: f32,
         height: f32,
+        color: [u8; 4],
+    },
+    Text {
+        text: String,
+        x: f32,
+        y: f32,
         color: [u8; 4],
     },
 }
@@ -46,6 +53,14 @@ pub fn render(canvas: &mut WindowCanvas, commands: &[DrawCommand]) {
             } => {
                 set_color(canvas, color);
                 let _ = canvas.fill_rect(FRect::new(x, y, width.max(0.0), height.max(0.0)));
+            }
+            DrawCommand::Text {
+                ref text,
+                x,
+                y,
+                color,
+            } => {
+                draw_text_canvas(canvas, text, x, y, color);
             }
         }
     }
@@ -101,6 +116,28 @@ fn set_color(canvas: &mut WindowCanvas, color: [u8; 4]) {
     canvas.set_draw_color(Color::RGBA(color[0], color[1], color[2], color[3]));
 }
 
+#[cfg(not(target_os = "linux"))]
+fn draw_text_canvas(canvas: &mut WindowCanvas, text: &str, x: f32, y: f32, color: [u8; 4]) {
+    set_color(canvas, color);
+    for (character_index, character) in text.chars().enumerate() {
+        let Some(glyph) = font8x8::BASIC_FONTS.get(character) else {
+            continue;
+        };
+        for (row, bits) in glyph.iter().enumerate() {
+            for column in 0..8 {
+                if bits & (1 << column) != 0 {
+                    let _ = canvas.fill_rect(FRect::new(
+                        x + (character_index * 8 + column) as f32,
+                        y + row as f32,
+                        1.0,
+                        1.0,
+                    ));
+                }
+            }
+        }
+    }
+}
+
 pub fn render_argb8888(pixels: &mut [u8], width: u32, height: u32, commands: &[DrawCommand]) {
     for command in commands {
         match *command {
@@ -118,6 +155,44 @@ pub fn render_argb8888(pixels: &mut [u8], width: u32, height: u32, commands: &[D
                 height: rect_height,
                 color,
             } => draw_rect_pixels(pixels, width, height, x, y, rect_width, rect_height, color),
+            DrawCommand::Text {
+                ref text,
+                x,
+                y,
+                color,
+            } => draw_text_pixels(pixels, width, height, text, x, y, color),
+        }
+    }
+}
+
+fn draw_text_pixels(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    text: &str,
+    x: f32,
+    y: f32,
+    color: [u8; 4],
+) {
+    let origin_x = x.round() as i32;
+    let origin_y = y.round() as i32;
+    for (character_index, character) in text.chars().enumerate() {
+        let Some(glyph) = font8x8::BASIC_FONTS.get(character) else {
+            continue;
+        };
+        for (row, bits) in glyph.iter().enumerate() {
+            for column in 0..8 {
+                let pixel_x = origin_x + (character_index * 8 + column) as i32;
+                let pixel_y = origin_y + row as i32;
+                if bits & (1 << column) != 0
+                    && pixel_x >= 0
+                    && pixel_y >= 0
+                    && pixel_x < width as i32
+                    && pixel_y < height as i32
+                {
+                    blend_pixel(pixels, width, pixel_x as u32, pixel_y as u32, color);
+                }
+            }
         }
     }
 }

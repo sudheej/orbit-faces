@@ -1,100 +1,233 @@
 # orbital-face-host
 
-Minimal Windows-first desktop companion face host prototype using Rust, SDL3, and Lua.
+Minimal Face Pack Runtime v0 for a transparent desktop companion face.
 
-This project proves the face/window layer only. It does not include LLMs, voice, marketplace, agents, memory, cloud sync, or plugin security.
+The shared runtime uses Rust, Lua through `mlua`, JSON stdin events, and a tiny
+immediate-mode drawing API. Hyprland uses a native `wlr-layer-shell` surface;
+Windows and macOS currently use the SDL3 path and still require platform
+validation.
 
-On Linux/Wayland compositors that support `wlr-layer-shell` (including
-Hyprland), the host uses a native layer surface instead of a decorated desktop
-window. Other platforms continue to use SDL3.
+The runtime includes a deterministic mock provider and optional local Ollama
+text generation. This repository still excludes voice, tools, agents,
+persistent memory, marketplace, cloud services, and plugin permissions.
 
 ## Run
 
 Requirements:
+
 - Rust stable
 - Hyprland or another `wlr-layer-shell` compositor on Linux
-- Windows remains a target but still requires native validation
-- SDL3 is built from source through the `sdl3` crate feature in this prototype
+- CMake and native build tools for SDL3 builds
+
+Run the default face:
 
 ```sh
 cargo run
 ```
 
-For an interactive test menu:
+Select a face pack:
+
+```sh
+cargo run -- --face examples/basic_orb
+```
+
+Interactive test menu:
 
 ```sh
 ./test-orb.sh
+./test-orb.sh examples/pixel_pet
 ```
 
-The default face package is `examples/basic_orb`. You can also pass a face directory:
+Without `--bridge`, stdin remains available as the legacy/simple test mode.
+
+## Running with Orbital Runtime
+
+Terminal 1:
 
 ```sh
-cargo run -- examples/basic_orb
+cargo run --bin orbital-runtime
 ```
 
-Send state changes by typing JSON lines into stdin:
+Terminal 2:
+
+```sh
+cargo run -- --face examples/basic_orb --bridge ws://127.0.0.1:7373
+```
+
+Type messages into the runtime terminal. The runtime uses its local mock model
+provider and drives the face through thinking, speaking, and idle. Runtime
+commands include `/status`, `/model`, `/context`, `/clipboard`,
+`/attach-text`, `/attach-file`, `/watch`, `/demo`, `/ping`, and `/quit`.
+
+See [docs/runtime-v0.md](docs/runtime-v0.md) for behavior, model-provider
+details, and limitations.
+
+### Running with Ollama
+
+Pull the recommended lightweight model:
+
+```sh
+ollama pull qwen2.5:1.5b
+```
+
+Terminal 1:
+
+```sh
+cargo run --bin orbital-runtime -- --model ollama --ollama-model qwen2.5:1.5b
+```
+
+Terminal 2:
+
+```sh
+cargo run -- --face examples/basic_orb --bridge ws://127.0.0.1:7373
+```
+
+Then type a prompt into the runtime terminal. Ollama response chunks drive
+compact speaking captions on the face. Mock remains the default and fallback:
+
+```sh
+cargo run --bin orbital-runtime -- --model mock
+```
+
+See [docs/model-provider-v0.md](docs/model-provider-v0.md) for the optional
+coding model, base URL and system-prompt options, `/model`, `/clear`, and
+failure behavior.
+
+### Adding explicit context
+
+Clipboard example:
+
+```text
+/clipboard
+summarize this
+```
+
+File example:
+
+```text
+/attach-file ./README.md
+what does this project do?
+```
+
+Windows active-window metadata example:
+
+```text
+/watch
+what window am I working in?
+/unwatch
+```
+
+Use `/context` to inspect attached items and `/clear-context` to remove them.
+Clipboard is read only on `/clipboard`; watch mode tracks title/process
+metadata only and captures no screenshots. See
+[docs/context-v0.md](docs/context-v0.md) for privacy behavior and limits.
+
+## Running with mock runtime
+
+Terminal 1:
+
+```sh
+cargo run --bin orbital-runtime-mock
+```
+
+Terminal 2:
+
+```sh
+cargo run -- --face examples/basic_orb --bridge ws://127.0.0.1:7373
+```
+
+The mock runtime listens on localhost, sends the sequence `idle -> listening ->
+thinking -> speaking -> happy -> idle`, and logs events received from the face
+host. Clicking, double-clicking, or completing a drag sends an event back to
+the mock runtime.
+
+The face host remains open if the runtime is unavailable and retries the
+connection every two seconds. Restarting the mock runtime causes the face host
+to reconnect and send `face.ready` again.
+
+See [docs/bridge-protocol-v0.md](docs/bridge-protocol-v0.md) for the JSON
+protocol and current limitations.
+
+## Events
+
+Typed state event:
 
 ```json
-{"state":"listening"}
-{"state":"thinking"}
-{"state":"speaking"}
-{"state":"idle"}
+{"type":"state","state":"listening","caption":"Listening..."}
 ```
 
-Always-on-top can be controlled without focusing the face window:
+Optional state metadata:
+
+```json
+{"type":"state","state":"speaking","emotion":"focused","caption":"Working...","audio_level":0.8}
+```
+
+The original short form remains supported:
+
+```json
+{"state":"thinking"}
+```
+
+Unknown JSON fields are ignored. A state not listed in the face manifest logs a
+warning and falls back to `idle`.
+
+Runtime test controls are also accepted:
 
 ```json
 {"always_on_top":true}
-{"always_on_top":false}
+{"debug":true}
 ```
 
-Keyboard:
-- `T`: toggle always-on-top if the platform delivers keys to the non-focusable window
+## Local controls
+
+- `A`: toggle always-on-top
+- `D`: toggle debug overlay
 - `Esc`: quit
 
-Mouse:
-- Drag the visible orb area to move the window.
+On Hyprland, click the orb first to grant on-demand keyboard focus. The stdin
+and interactive-script controls do not require focus.
 
-## Face Package
+Mouse dragging starts only inside the face hit region.
 
-The example package lives in `examples/basic_orb`:
+## Face packs
 
-- `manifest.json` declares the script path and window size.
-- `main.lua` defines `companion.load`, `companion.state_changed`, `companion.update`, and `companion.draw`.
+The default pack is under `examples/basic_orb/`:
 
-The drawing API is intentionally tiny:
-
-```lua
-ctx.clear(r, g, b, a)
-ctx.circle(x, y, radius, r, g, b, a)
-ctx.rect(x, y, width, height, r, g, b, a)
+```text
+examples/basic_orb/
+├── manifest.json
+├── main.lua
+└── assets/
 ```
 
-## Current Status
+See [docs/face-pack-v0.md](docs/face-pack-v0.md) for the manifest, event
+contract, Lua lifecycle, and drawing API.
 
-Implemented:
-- Native Wayland layer-shell surface on Hyprland
-- Transparent shared-memory rendering with no compositor window border
-- Circular Wayland input region for click-through corners
-- Borderless SDL3 window
-- Lua-driven orb animation
-- `idle`, `listening`, `thinking`, and `speaking` states
-- Stdin JSON state events
-- Stdin always-on-top control
-- Manual dragging
-- SDL hit-test setup for draggable visible region
-- SDL3 circular window shape/alpha mask attempt
-- Windows-only always-on-top toggle attempt
-- Transparent-window flag attempt
+See [docs/windowing-notes.md](docs/windowing-notes.md) for platform behavior and
+limitations.
 
-Known limitations:
-- The Linux layer-shell backend requires compositor support for
-  `wlr-layer-shell`; it is not universal across all Wayland desktops.
-- Linux dragging adjusts layer-shell margins and should be considered
-  Hyprland/wlroots-specific behavior.
-- Per-pixel transparency depends on SDL3 renderer/backend and Windows compositor behavior.
-- The circular shape uses `SDL_SetWindowShape`; Windows behavior must be verified on a real desktop.
-- SDL documents fully transparent shaped pixels as click-through, but this still requires Windows verification with the selected renderer/backend.
-- Avoiding keyboard focus is attempted with SDL's `NOT_FOCUSABLE` flag, but behavior must be verified on real Windows builds.
+## Example Face Packs
 
-See `docs/windowing-notes.md` for platform details.
+Each pack uses the same runtime, manifest contract, events, and Lua API:
+
+```sh
+cargo run -- --face examples/basic_orb
+cargo run -- --face examples/pixel_pet
+cargo run -- --face examples/terminal_cube
+cargo run -- --face examples/minimal_dot
+```
+
+- `basic_orb`: smooth glowing reference orb.
+- `pixel_pet`: blocky retro desktop mascot with expressions and sleep `Z`s.
+- `terminal_cube`: developer-oriented terminal monitor with scanlines, loading
+  indicators, waveform output, and error diagnostics.
+- `minimal_dot`: low-distraction dot, rings, orbiting indicators, and
+  audio-reactive pulse.
+
+All four packs declare `idle`, `listening`, `thinking`, `speaking`, `happy`,
+`error`, and `sleeping`.
+
+See [docs/example-face-packs.md](docs/example-face-packs.md) for their visual
+intent and testing guidance. A future irregular
+[Winamp-style panel](docs/winamp-panel-future.md) is documented but deliberately
+not implemented yet.

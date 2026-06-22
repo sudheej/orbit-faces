@@ -1,10 +1,10 @@
 {
   "kind": "orbital.face",
   "version": "0.1",
-  "name": "Basic Orb",
+  "name": "Terminal Cube",
   "entry": "main.lua",
   "window": {
-    "width": 260,
+    "width": 280,
     "height": 260,
     "transparent": true,
     "borderless": true,
