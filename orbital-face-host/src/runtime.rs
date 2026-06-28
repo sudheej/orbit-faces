@@ -59,6 +59,22 @@ impl FaceRuntime {
         }
     }
 
+    pub fn switch_pack(&mut self, pack: FacePack) -> anyhow::Result<()> {
+        let mut replacement = Self::load(pack, self.platform_status.clone())?;
+        replacement.debug = self.debug;
+        replacement.always_on_top = self.always_on_top;
+        replacement.bridge_mode.clone_from(&self.bridge_mode);
+        replacement.bridge_connected = self.bridge_connected;
+        replacement
+            .last_received_event
+            .clone_from(&self.last_received_event);
+        replacement
+            .last_sent_event
+            .clone_from(&self.last_sent_event);
+        *self = replacement;
+        Ok(())
+    }
+
     pub fn update_and_draw(&mut self, dt: f32, time: f32) -> Vec<DrawCommand> {
         if let Err(error) = self.lua_host.call_update(dt) {
             self.record_lua_error("companion.update", error);

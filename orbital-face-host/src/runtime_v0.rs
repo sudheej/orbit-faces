@@ -49,6 +49,8 @@ pub enum RuntimeCommand {
     AskSelection(String),
     AskSelectionOnce(String),
     Listen(u64),
+    AutoListen(bool),
+    Face(String),
     TranscribeFile(String),
     Say(String),
     SpeechStatus,
@@ -85,6 +87,16 @@ pub fn parse_command(line: &str) -> RuntimeCommand {
             .map(RuntimeCommand::Listen)
             .unwrap_or_else(|_| RuntimeCommand::Unknown(input.to_owned()));
     }
+    if let Some(mode) = input.strip_prefix("/auto-listen ") {
+        return match mode.trim() {
+            "on" | "start" => RuntimeCommand::AutoListen(true),
+            "off" | "stop" => RuntimeCommand::AutoListen(false),
+            _ => RuntimeCommand::Unknown(input.to_owned()),
+        };
+    }
+    if let Some(face) = input.strip_prefix("/face ") {
+        return RuntimeCommand::Face(face.trim().to_owned());
+    }
     match input {
         "" => RuntimeCommand::Empty,
         "/quit" => RuntimeCommand::Quit,
@@ -106,6 +118,8 @@ pub fn parse_command(line: &str) -> RuntimeCommand {
         "/ask-selection" => RuntimeCommand::AskSelection(String::new()),
         "/ask-selection-once" => RuntimeCommand::AskSelectionOnce(String::new()),
         "/listen" => RuntimeCommand::Listen(5),
+        "/auto-listen" => RuntimeCommand::AutoListen(true),
+        "/face" => RuntimeCommand::Face(String::new()),
         "/transcribe-file" => RuntimeCommand::TranscribeFile(String::new()),
         "/say" => RuntimeCommand::Say(String::new()),
         "/speech-status" => RuntimeCommand::SpeechStatus,
@@ -143,6 +157,8 @@ pub enum RuntimeToFaceEvent {
     Ping { id: String },
     #[serde(rename = "pong")]
     Pong { id: String },
+    #[serde(rename = "face.switch")]
+    SwitchFace { face: String },
 }
 
 impl RuntimeToFaceEvent {
@@ -151,6 +167,7 @@ impl RuntimeToFaceEvent {
             Self::State { .. } => "state",
             Self::Ping { .. } => "ping",
             Self::Pong { .. } => "pong",
+            Self::SwitchFace { .. } => "face.switch",
         }
     }
 }
@@ -477,6 +494,16 @@ mod tests {
     }
 
     #[test]
+    fn face_switch_serializes_for_the_host() {
+        let event = RuntimeToFaceEvent::SwitchFace {
+            face: "terminal_cube".into(),
+        };
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "face.switch");
+        assert_eq!(json["face"], "terminal_cube");
+    }
+
+    #[test]
     fn unknown_face_event_is_non_fatal() {
         let message = parse_face_message(r#"{"type":"face.future","value":1}"#).unwrap();
         assert_eq!(
@@ -563,6 +590,18 @@ mod tests {
     fn parses_speech_commands_and_listen_bounds() {
         assert_eq!(parse_command("/listen"), RuntimeCommand::Listen(5));
         assert_eq!(parse_command("/listen 12"), RuntimeCommand::Listen(12));
+        assert_eq!(
+            parse_command("/auto-listen"),
+            RuntimeCommand::AutoListen(true)
+        );
+        assert_eq!(
+            parse_command("/auto-listen off"),
+            RuntimeCommand::AutoListen(false)
+        );
+        assert_eq!(
+            parse_command("/face pixel_pet"),
+            RuntimeCommand::Face("pixel_pet".into())
+        );
         assert!(matches!(
             parse_command("/listen 21"),
             RuntimeCommand::Unknown(_)

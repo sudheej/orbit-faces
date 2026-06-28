@@ -44,6 +44,7 @@ fn main() -> anyhow::Result<()> {
     runtime.selection_capture_supported = SystemSelectionProvider.supported();
     runtime.active_window_supported = SystemActiveWindowProvider.supported();
     let hotkeys = start_hotkeys(&options, &mut runtime);
+    let mut auto_listen = false;
 
     println!("Orbital Runtime v0");
     println!("Bridge listening on {BRIDGE_URL}");
@@ -53,7 +54,7 @@ fn main() -> anyhow::Result<()> {
         "Commands: /quit, /status, /model, /clear, /context, /clear-context, \
          /clipboard, /active-window, /watch, /unwatch, /attach-text, /attach-file, \
          /selection, /ask, /ask-selection, /ask-selection-once, /listen, \
-         /transcribe-file, /say, /speech-status, /demo, /ping"
+         /auto-listen, /face, /transcribe-file, /say, /speech-status, /demo, /ping"
     );
 
     loop {
@@ -81,6 +82,7 @@ fn main() -> anyhow::Result<()> {
                     provider.as_ref(),
                     &options.system_prompt,
                     &mut speech,
+                    &mut auto_listen,
                     parse_command(&line),
                 ) {
                     break;
@@ -88,6 +90,16 @@ fn main() -> anyhow::Result<()> {
             }
             Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(25)),
             Err(TryRecvError::Disconnected) => break,
+        }
+
+        if auto_listen {
+            auto_listen_and_ask(
+                &bridge,
+                &mut runtime,
+                provider.as_ref(),
+                &options.system_prompt,
+                &mut speech,
+            );
         }
     }
 
@@ -234,6 +246,7 @@ fn handle_command(
     provider: &dyn ModelProvider,
     system_prompt: &str,
     speech: &mut SpeechServices,
+    auto_listen: &mut bool,
     command: RuntimeCommand,
 ) -> bool {
     match command {
@@ -295,6 +308,32 @@ fn handle_command(
         ),
         RuntimeCommand::Listen(seconds) => {
             listen_and_ask(bridge, runtime, provider, system_prompt, speech, seconds)
+        }
+        RuntimeCommand::AutoListen(enabled) => {
+            if enabled && (!speech.stt.requires_audio_capture() || !speech.audio.supported()) {
+                eprintln!("Auto-listen requires a real STT provider and an available microphone.");
+                *auto_listen = false;
+            } else {
+                *auto_listen = enabled;
+                println!(
+                    "Auto-listen {}.",
+                    if enabled {
+                        "started; speak when ready"
+                    } else {
+                        "stopped"
+                    }
+                );
+            }
+        }
+        RuntimeCommand::Face(face) => {
+            if face.is_empty() {
+                eprintln!("Usage: /face <name-or-directory>");
+            } else if !runtime.face_connected {
+                eprintln!("Face disconnected; cannot switch face.");
+            } else {
+                println!("Requesting face switch to {face:?}");
+                send_event(bridge, runtime, RuntimeToFaceEvent::SwitchFace { face });
+            }
         }
         RuntimeCommand::TranscribeFile(path) => transcribe_file(bridge, runtime, speech, &path),
         RuntimeCommand::Say(text) => say_text(bridge, runtime, speech, &text),
@@ -725,6 +764,47 @@ fn listen_and_ask(
     }
 }
 
+fn auto_listen_and_ask(
+    bridge: &RuntimeBridge,
+    runtime: &mut RuntimeCore,
+    model: &dyn ModelProvider,
+    system_prompt: &str,
+    speech: &mut SpeechServices,
+) {
+    send_state(
+        bridge,
+        runtime,
+        CompanionState::Listening,
+        "Listening for speech...",
+        None,
+    );
+    let wav_path = temporary_audio_path("auto-listen");
+    let result = speech
+        .audio
+        .capture_until_pause(20, &wav_path)
+        .and_then(|_| transcribe_path(bridge, runtime, speech, &wav_path));
+    let _ = std::fs::remove_file(&wav_path);
+
+    match result {
+        Ok(transcript) if transcript.trim().is_empty() => {
+            send_state(bridge, runtime, CompanionState::Idle, "Ready", None);
+        }
+        Ok(transcript) => {
+            println!("Transcript: {transcript}");
+            run_prompt(
+                bridge,
+                runtime,
+                model,
+                system_prompt,
+                speech,
+                transcript,
+                None,
+            );
+        }
+        Err(error) => speech_failure(bridge, runtime, speech, error),
+    }
+}
+
 fn transcribe_file(
     bridge: &RuntimeBridge,
     runtime: &mut RuntimeCore,
@@ -932,13 +1012,17 @@ fn log_face_message(message: &FaceToRuntimeMessage) {
         }
         FaceToRuntimeMessage::DoubleClicked { x, y, button, .. } => {
             println!("<- face.double_clicked x={x:.0} y={y:.0} button={button}");
-            println!("Listening toggled visually; voice input is not implemented.");
+            println!(
+                "Double-click toggles visual state only; use /listen or /auto-listen for voice."
+            );
         }
         FaceToRuntimeMessage::Dragged { x, y } => println!("<- face.dragged x={x} y={y}"),
         FaceToRuntimeMessage::Action { action } => {
             println!("<- face.action action={action:?}");
             if action == "toggle_listening" {
-                println!("Listening toggled visually; voice input is not implemented.");
+                println!(
+                    "This action toggles visual state only; use /listen or /auto-listen for voice."
+                );
             }
         }
         FaceToRuntimeMessage::Ping { id } => println!("<- ping id={id:?}"),

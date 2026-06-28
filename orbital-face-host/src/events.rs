@@ -35,6 +35,8 @@ struct RawEvent {
     debug_overlay: Option<bool>,
     #[serde(default)]
     id: Option<String>,
+    #[serde(default)]
+    face: Option<String>,
     #[serde(flatten)]
     _unknown: std::collections::HashMap<String, Value>,
 }
@@ -56,6 +58,9 @@ pub enum RuntimeMessage {
     },
     Ping {
         id: String,
+    },
+    SwitchFace {
+        face: String,
     },
     Unknown {
         event_type: String,
@@ -94,6 +99,12 @@ pub fn parse_runtime_message(line: &str) -> serde_json::Result<RuntimeMessage> {
                 .id
                 .ok_or_else(|| invalid_message("ping event is missing id"))?,
         }),
+        Some("face.switch") => Ok(RuntimeMessage::SwitchFace {
+            face: event
+                .face
+                .filter(|face| !face.trim().is_empty())
+                .ok_or_else(|| invalid_message("face.switch is missing face"))?,
+        }),
         None if event.always_on_top.is_some() => Ok(RuntimeMessage::Event {
             event_type: "config",
             event: FaceEvent::Config {
@@ -121,6 +132,9 @@ fn parse_stdin_event(line: &str) -> serde_json::Result<FaceEvent> {
         RuntimeMessage::Ping { .. } => {
             Err(invalid_message("ping is only supported in bridge mode"))
         }
+        RuntimeMessage::SwitchFace { .. } => Err(invalid_message(
+            "face switching is only supported in bridge mode",
+        )),
         RuntimeMessage::Unknown { event_type } => Err(invalid_message(&format!(
             "unsupported event type {event_type:?}"
         ))),
@@ -236,6 +250,18 @@ mod tests {
             message,
             RuntimeMessage::Ping {
                 id: "abc123".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_face_switch_event() {
+        let message =
+            parse_runtime_message(r#"{"type":"face.switch","face":"pixel_pet"}"#).unwrap();
+        assert_eq!(
+            message,
+            RuntimeMessage::SwitchFace {
+                face: "pixel_pet".into()
             }
         );
     }

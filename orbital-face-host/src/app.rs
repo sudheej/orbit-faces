@@ -147,11 +147,33 @@ impl App {
                     self.apply_face_event(event);
                 }
                 RuntimeMessage::Ping { .. } => self.runtime.record_received_event("ping"),
+                RuntimeMessage::SwitchFace { face } => {
+                    self.runtime.record_received_event("face.switch");
+                    self.switch_face(&face);
+                }
                 RuntimeMessage::Unknown { event_type } => {
                     eprintln!("warning: ignored unknown bridge message type {event_type:?}");
                     self.runtime.record_received_event(event_type);
                 }
             },
+        }
+    }
+
+    fn switch_face(&mut self, requested: &str) {
+        let path = self.runtime.pack.resolve_switch_path(requested);
+        let result = FacePack::load(path).and_then(|pack| {
+            self.host_window.resize_for_face(&pack.manifest.window)?;
+            self.runtime.switch_pack(pack)
+        });
+        match result {
+            Ok(()) => {
+                eprintln!("switched face to {:?}", self.runtime.pack.manifest.name);
+                self.send_bridge_event(FaceToRuntimeEvent::Ready {
+                    face: self.runtime.pack.manifest.name.clone(),
+                    version: self.runtime.pack.manifest.version.clone(),
+                });
+            }
+            Err(error) => eprintln!("face switch failed for {requested:?}: {error:#}"),
         }
     }
 

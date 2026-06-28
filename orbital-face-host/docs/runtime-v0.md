@@ -45,6 +45,9 @@ can connect to the same server and sends a new `face.ready` event.
 - `/ask-selection <question>`: capture a selection and ask immediately.
 - `/ask-selection-once <question>`: use the selection for one request only.
 - `/listen [seconds]`: explicitly record and transcribe one bounded utterance.
+- `/auto-listen [on|off]`: keep taking conversational turns, ending each one
+  after a pause and resuming after the response.
+- `/face <name-or-directory>`: hot-reload a face pack in the connected host.
 - `/transcribe-file <path>`: transcribe a WAV without asking the model.
 - `/say <text>`: invoke the selected TTS provider.
 - `/speech-status`: print speech provider configuration and recent results.

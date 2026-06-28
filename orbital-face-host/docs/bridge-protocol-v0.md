@@ -13,6 +13,16 @@ guarantees, or message persistence.
 
 ## Runtime to face host
 
+The runtime can request an in-process face-pack reload. A short name resolves
+beside the current face pack; a directory path is also accepted:
+
+```json
+{"type":"face.switch","face":"pixel_pet"}
+```
+
+On success the host sends a new `face.ready` event. On failure it keeps the
+current face active and logs the load error.
+
 ### State
 
 ```json

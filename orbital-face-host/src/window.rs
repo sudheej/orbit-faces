@@ -82,6 +82,38 @@ pub fn create(sdl: &sdl3::Sdl, settings: &FaceWindow) -> anyhow::Result<HostWind
 }
 
 impl HostWindow {
+    pub fn resize_for_face(&mut self, settings: &FaceWindow) -> anyhow::Result<()> {
+        self.canvas
+            .window_mut()
+            .set_size(settings.width, settings.height)
+            .context("failed to resize SDL face window")?;
+        self.hit_mask = CircleHitMask {
+            width: settings.width,
+            height: settings.height,
+            radius: settings.width.min(settings.height) as f32 * 0.44,
+        };
+        let callback_hit_mask = self.hit_mask;
+        self.canvas
+            .window_mut()
+            .set_hit_test(move |point| {
+                if callback_hit_mask.contains(point) {
+                    HitTestResult::Draggable
+                } else {
+                    HitTestResult::Normal
+                }
+            })
+            .context("failed to update SDL face hit test")?;
+        if settings.transparent {
+            platform::set_circle_shape(
+                self.canvas.window(),
+                settings.width,
+                settings.height,
+                self.hit_mask.radius,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn begin_drag(&mut self, mouse_x: f32, mouse_y: f32) -> bool {
         if !self.hit_mask.contains_xy(mouse_x, mouse_y) {
             return false;

@@ -2,10 +2,11 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub trait AudioCaptureProvider {
     fn capture_wav(&self, seconds: u64, output_path: &Path) -> anyhow::Result<()>;
+    fn capture_until_pause(&self, max_seconds: u64, output_path: &Path) -> anyhow::Result<()>;
     fn supported(&self) -> bool;
 }
 
@@ -20,9 +21,21 @@ impl AudioCaptureProvider for SystemAudioCapture {
     fn supported(&self) -> bool {
         cpal::default_host().default_input_device().is_some()
     }
+
+    fn capture_until_pause(&self, max_seconds: u64, output_path: &Path) -> anyhow::Result<()> {
+        capture_wav_until_pause(max_seconds, output_path)
+    }
 }
 
 fn capture_wav(seconds: u64, output_path: &Path) -> anyhow::Result<()> {
+    capture_wav_inner(seconds, output_path, false)
+}
+
+fn capture_wav_until_pause(max_seconds: u64, output_path: &Path) -> anyhow::Result<()> {
+    capture_wav_inner(max_seconds, output_path, true)
+}
+
+fn capture_wav_inner(seconds: u64, output_path: &Path, stop_on_pause: bool) -> anyhow::Result<()> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -73,7 +86,11 @@ fn capture_wav(seconds: u64, output_path: &Path) -> anyhow::Result<()> {
     stream
         .play()
         .map_err(|error| anyhow::anyhow!("failed to start microphone stream: {error}"))?;
-    std::thread::sleep(Duration::from_secs(seconds));
+    if stop_on_pause {
+        wait_for_pause(&samples, Duration::from_secs(seconds))?;
+    } else {
+        std::thread::sleep(Duration::from_secs(seconds));
+    }
     drop(stream);
 
     if let Some(error) = error_slot.lock().ok().and_then(|mut slot| slot.take()) {
@@ -94,6 +111,50 @@ fn capture_wav(seconds: u64, output_path: &Path) -> anyhow::Result<()> {
         writer.write_sample(sample)?;
     }
     writer.finalize()?;
+    Ok(())
+}
+
+fn wait_for_pause(samples: &Arc<Mutex<Vec<i16>>>, max_duration: Duration) -> anyhow::Result<()> {
+    const SPEECH_RMS: f32 = 0.015;
+    const PAUSE: Duration = Duration::from_millis(900);
+    let started_at = Instant::now();
+    let mut inspected = 0;
+    let mut speech_started = false;
+    let mut last_voice = started_at;
+
+    while started_at.elapsed() < max_duration {
+        std::thread::sleep(Duration::from_millis(50));
+        let (rms, new_len) = {
+            let data = samples
+                .lock()
+                .map_err(|_| anyhow::anyhow!("microphone sample buffer was poisoned"))?;
+            let chunk = &data[inspected.min(data.len())..];
+            let rms = if chunk.is_empty() {
+                0.0
+            } else {
+                let energy = chunk
+                    .iter()
+                    .map(|sample| {
+                        let normalized = *sample as f32 / i16::MAX as f32;
+                        normalized * normalized
+                    })
+                    .sum::<f32>();
+                (energy / chunk.len() as f32).sqrt()
+            };
+            (rms, data.len())
+        };
+        inspected = new_len;
+        if rms >= SPEECH_RMS {
+            speech_started = true;
+            last_voice = Instant::now();
+        } else if speech_started && last_voice.elapsed() >= PAUSE {
+            return Ok(());
+        }
+    }
+    anyhow::ensure!(
+        speech_started,
+        "no speech detected before auto-listen timed out"
+    );
     Ok(())
 }
 

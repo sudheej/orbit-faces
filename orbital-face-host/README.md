@@ -164,6 +164,14 @@ cargo run --bin orbital-runtime -- --model mock --stt mock --tts none
 /listen 5
 ```
 
+For hands-free follow-up turns, start pause-detected listening and stop it from
+the terminal when finished:
+
+```text
+/auto-listen
+/auto-listen off
+```
+
 Whisper.cpp flow:
 
 ```sh
@@ -195,8 +203,18 @@ cargo run --bin orbital-runtime -- \
   --piper-model ./voices/en_US-lessac-medium.onnx
 ```
 
-Speech is push-to-talk only. There is no wake word or background microphone
-monitoring. See [docs/speech-io-v0.md](docs/speech-io-v0.md).
+Speech capture starts only through `/listen`, its hotkey, or the explicitly
+enabled `/auto-listen` mode. There is no wake word. See
+[docs/speech-io-v0.md](docs/speech-io-v0.md).
+
+### Switching faces at runtime
+
+Switch the connected host to another bundled face without restarting it:
+
+```text
+/face pixel_pet
+/face examples/terminal_cube
+```
 
 ## Running with mock runtime
 

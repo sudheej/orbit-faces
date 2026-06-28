@@ -71,6 +71,22 @@ impl FacePack {
             .iter()
             .any(|candidate| candidate == state)
     }
+
+    pub fn resolve_switch_path(&self, requested: &str) -> PathBuf {
+        let requested = PathBuf::from(requested);
+        if requested.join("manifest.json").is_file() {
+            return requested;
+        }
+        if requested.components().count() == 1 {
+            if let Some(parent) = self.directory.parent() {
+                let sibling = parent.join(&requested);
+                if sibling.join("manifest.json").is_file() {
+                    return sibling;
+                }
+            }
+        }
+        requested
+    }
 }
 
 impl FaceManifest {

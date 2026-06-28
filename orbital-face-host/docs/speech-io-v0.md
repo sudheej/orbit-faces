@@ -1,7 +1,7 @@
 # Orbital Speech I/O v0
 
-Speech I/O is explicit push-to-talk only. Orbital does not use a wake word,
-continuously monitor the microphone, perform background recording, or run VAD.
+Speech I/O supports explicit push-to-talk and an opt-in conversational mode.
+Orbital does not start microphone capture at startup or use a wake word.
 
 ## Providers
 
@@ -36,6 +36,21 @@ Runs one explicit capture, from 1 to 20 seconds. The default is 5 seconds.
 The face shows `listening`, then `thinking` while STT runs. A successful
 transcript enters the existing model prompt flow and produces speaking
 captions.
+
+### `/auto-listen [on|off]`
+
+Starts or stops conversational listening:
+
+```text
+/auto-listen
+/auto-listen off
+```
+
+Once started, Orbital waits for speech, treats about 900 ms of silence as the
+end of the turn, transcribes it, responds, and resumes listening. Each capture
+has a 20-second safety bound. Auto-listen requires a real STT provider and an
+available microphone; mock STT is rejected to prevent a synthetic response
+loop. A stop command entered during a turn is applied after that bounded turn.
 
 In mock mode, no microphone is opened:
 
@@ -147,14 +162,15 @@ Existing hotkeys remain unchanged.
 
 ## Audio and privacy behavior
 
-- Microphone capture occurs only for `/listen` or `Ctrl+Alt+L`.
-- Capture duration is always bounded from 1 to 20 seconds.
+- Microphone capture occurs only for `/listen`, `Ctrl+Alt+L`, or after explicitly
+  starting `/auto-listen`.
+- Capture duration is always bounded to 20 seconds or less.
 - Audio is written to a temporary PCM WAV and removed after transcription where
   practical.
 - `/transcribe-file` never modifies the source file.
 - No recording starts at runtime startup.
-- No wake word, VAD, continuous STT, cloud speech service, or persistent audio
-  storage exists in v0.
+- Auto-listen uses a small local RMS-based pause detector. There is no wake word,
+  cloud speech service, or persistent audio storage.
 
 ## Limitations
 

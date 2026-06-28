@@ -107,6 +107,7 @@ pub fn run(options: LaunchOptions) -> anyhow::Result<()> {
     let pool_size = width as usize * height as usize * 4 * 3;
     let pool = SlotPool::new(pool_size, &shm).context("failed to create Wayland SHM pool")?;
     let mut state = WaylandApp {
+        compositor,
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
         output_state: OutputState::new(&globals, &qh),
@@ -146,6 +147,7 @@ pub fn run(options: LaunchOptions) -> anyhow::Result<()> {
 }
 
 struct WaylandApp {
+    compositor: CompositorState,
     registry_state: RegistryState,
     seat_state: SeatState,
     output_state: OutputState,
@@ -189,7 +191,7 @@ impl WaylandApp {
             .as_ref()
             .and_then(|bridge| bridge.try_recv().ok())
         {
-            self.apply_bridge_update(update);
+            self.apply_bridge_update(qh, update);
         }
 
         let now = Instant::now();
@@ -266,7 +268,7 @@ impl WaylandApp {
         }
     }
 
-    fn apply_bridge_update(&mut self, update: BridgeUpdate) {
+    fn apply_bridge_update(&mut self, qh: &QueueHandle<Self>, update: BridgeUpdate) {
         match update {
             BridgeUpdate::Connected => self.runtime.set_bridge_connected(true),
             BridgeUpdate::Disconnected => self.runtime.set_bridge_connected(false),
@@ -277,11 +279,49 @@ impl WaylandApp {
                     self.apply_face_event(event);
                 }
                 RuntimeMessage::Ping { .. } => self.runtime.record_received_event("ping"),
+                RuntimeMessage::SwitchFace { face } => {
+                    self.runtime.record_received_event("face.switch");
+                    self.switch_face(qh, &face);
+                }
                 RuntimeMessage::Unknown { event_type } => {
                     eprintln!("warning: ignored unknown bridge message type {event_type:?}");
                     self.runtime.record_received_event(event_type);
                 }
             },
+        }
+    }
+
+    fn switch_face(&mut self, qh: &QueueHandle<Self>, requested: &str) {
+        let path = self.runtime.pack.resolve_switch_path(requested);
+        let result = (|| {
+            let pack = FacePack::load(path)?;
+            let width = pack.manifest.window.width;
+            let height = pack.manifest.window.height;
+            self.runtime.switch_pack(pack)?;
+            self.width = width;
+            self.height = height;
+            self.hit_mask = CircleHitMask {
+                width,
+                height,
+                radius: width.min(height) as f32 * 0.44,
+            };
+            self.pool
+                .resize(width as usize * height as usize * 4 * 3)
+                .context("failed to resize Wayland SHM pool")?;
+            self.layer.set_size(width, height);
+            set_circle_input_region(&self.compositor, qh, &self.layer, self.hit_mask);
+            self.layer.commit();
+            Ok::<(), anyhow::Error>(())
+        })();
+        match result {
+            Ok(()) => {
+                eprintln!("switched face to {:?}", self.runtime.pack.manifest.name);
+                self.send_bridge_event(FaceToRuntimeEvent::Ready {
+                    face: self.runtime.pack.manifest.name.clone(),
+                    version: self.runtime.pack.manifest.version.clone(),
+                });
+            }
+            Err(error) => eprintln!("face switch failed for {requested:?}: {error:#}"),
         }
     }
 
