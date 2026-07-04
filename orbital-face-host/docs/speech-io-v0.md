@@ -115,14 +115,14 @@ whisper-cli -m <model> -f <wav> -np -nt -l en
 ```sh
 cargo run --bin orbital-runtime -- \
   --tts piper \
-  --piper-bin ./piper \
-  --piper-model ./voices/en_US-lessac-medium.onnx
+  --piper-bin ./piper/piper \
+  --piper-model ./voices/en_US-amy-medium.onnx
 ```
 
 Optional:
 
 ```text
---piper-config ./voices/en_US-lessac-medium.onnx.json
+--piper-config ./voices/en_US-amy-medium.onnx.json
 ```
 
 Piper WAV playback uses PowerShell on Windows, `aplay` on Linux, and `afplay`

@@ -40,25 +40,41 @@ cargo run --bin orbital-runtime -- \
   --ollama-model qwen2.5:1.5b
 ```
 
+Ollama model thinking is disabled by default to keep voice turns responsive,
+including for reasoning-capable models such as Gemma 4. Enable it explicitly
+for tasks where additional latency is acceptable:
+
+```sh
+cargo run --bin orbital-runtime -- \
+  --model ollama \
+  --ollama-model gemma4:e2b \
+  --enable-model-thinking
+```
+
 The provider uses Ollama's local `POST /api/chat` endpoint and streams its
 newline-delimited JSON responses. `GET /api/tags` supplies the `/model` health
 and installed-model check.
 
 ## System prompt
 
-The default prompt asks Orbital for concise answers suitable for a small face:
+The default prompt defines a neutral, ongoing companion rather than a fixed
+desktop-assistant personality:
 
-> You are Orbital, a concise local desktop companion. Reply in short, useful
-> answers. Prefer 1-3 sentences unless the user asks for detail. You are
-> running through a small desktop face, so keep captions compact.
+> You are an ongoing personal companion. No fixed personality, species, or
+> role is imposed; develop a consistent, natural relationship with the user
+> from the configured identity and your shared history.
 
 Override it for one runtime session:
 
 ```sh
 cargo run --bin orbital-runtime -- \
   --model ollama \
-  --system-prompt "Reply in one concise sentence."
+  --system-prompt "You are Pip, a curious fox-like companion who is playful but calm."
 ```
+
+Learned continuity is supplied separately from personality. The model is told
+to use it as ordinary shared history and to say "you told me before" rather
+than exposing database records, tool calls, or internal memory labels.
 
 ## Streaming captions
 
@@ -94,5 +110,7 @@ cargo run --bin orbital-runtime -- --model mock
 - Generation is synchronous in the terminal runtime.
 - Only text chat is supported.
 - History is session-local and capped at six exchanges.
-- There is no tool calling, persistent memory, voice, screen context, MCP, or
+- Model-suggested local tools are optional, use Ollama's separate tool-call
+  response channel, are audited, and are limited to one call. Future high-risk
+  tools are confirmation-gated. There is no autonomous tool chain, MCP, or
   remote model service integration.

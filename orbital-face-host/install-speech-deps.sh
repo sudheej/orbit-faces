@@ -7,8 +7,8 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 WHISPER_REPO="https://github.com/ggml-org/whisper.cpp.git"
 WHISPER_MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin"
 PIPER_URL="https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz"
-PIPER_VOICE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
-PIPER_CONFIG_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
+PIPER_VOICE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx"
+PIPER_CONFIG_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -67,8 +67,8 @@ else
   echo "Already installed: piper/piper"
 fi
 
-download_if_missing "$PIPER_VOICE_URL" "voices/en_US-lessac-medium.onnx"
-download_if_missing "$PIPER_CONFIG_URL" "voices/en_US-lessac-medium.onnx.json"
+download_if_missing "$PIPER_VOICE_URL" "voices/en_US-amy-medium.onnx"
+download_if_missing "$PIPER_CONFIG_URL" "voices/en_US-amy-medium.onnx.json"
 
 echo
 echo "Verifying speech dependencies..."
@@ -77,8 +77,8 @@ required_files=(
   "models/ggml-tiny.en.bin"
   "whisper.cpp/build/bin/whisper-cli"
   "piper/piper"
-  "voices/en_US-lessac-medium.onnx"
-  "voices/en_US-lessac-medium.onnx.json"
+  "voices/en_US-amy-medium.onnx"
+  "voices/en_US-amy-medium.onnx.json"
 )
 
 failed=0

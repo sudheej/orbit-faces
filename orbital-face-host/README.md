@@ -7,9 +7,10 @@ immediate-mode drawing API. Hyprland uses a native `wlr-layer-shell` surface;
 Windows and macOS currently use the SDL3 path and still require platform
 validation.
 
-The runtime includes a deterministic mock provider and optional local Ollama
-text generation. This repository still excludes voice, tools, agents,
-persistent memory, marketplace, cloud services, and plugin permissions.
+The runtime includes a deterministic mock provider, optional local Ollama text
+generation, local speech I/O, explicit SQLite memory, and a small audited
+local-only tool kernel. This repository still excludes autonomous agents,
+marketplace, cloud services, accounts, downloaded plugins, and mutation tools.
 
 ## Run
 
@@ -199,8 +200,9 @@ Or:
 ```sh
 cargo run --bin orbital-runtime -- \
   --tts piper \
-  --piper-bin ./piper \
-  --piper-model ./voices/en_US-lessac-medium.onnx
+  --piper-bin ./piper/piper \
+  --piper-model ./voices/en_US-amy-medium.onnx \
+  --piper-config ./voices/en_US-amy-medium.onnx.json
 ```
 
 Speech capture starts only through `/listen`, its hotkey, or the explicitly
@@ -215,6 +217,46 @@ Switch the connected host to another bundled face without restarting it:
 /face pixel_pet
 /face examples/terminal_cube
 ```
+
+### Local memory and tools
+
+Explicit long-term memory is stored in a local SQLite database. Full session
+messages and context contents remain off by default:
+
+```text
+/remember User is building Orbital, a local-first desktop companion.
+/memories
+/memory-search Orbital
+/memory-status
+```
+
+Inspect and run registered local tools:
+
+```text
+/tools
+/tool-info time.now
+/tool time.now {}
+/tool context.list {}
+/tool file.read_text {"path":"./README.md"}
+/tool-history
+```
+
+Current local read-only and explicit-memory tools run without an approval
+interruption, and every invocation is audited in the local database. Future
+high-risk tools will require confirmation. Model-suggested tools are disabled
+unless explicitly enabled:
+
+```sh
+cargo run --bin orbital-runtime -- \
+  --model ollama \
+  --ollama-model qwen2.5:1.5b \
+  --enable-model-tools
+```
+
+Then ask: `Search memory for Orbital and summarize what you know.` The runtime
+executes at most one local tool and reports it in the terminal and audit log. See
+[docs/memory-store-v0.md](docs/memory-store-v0.md) and
+[docs/tool-kernel-v0.md](docs/tool-kernel-v0.md).
 
 ## Running with mock runtime
 

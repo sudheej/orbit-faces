@@ -1,11 +1,27 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
-pub trait TextToSpeechProvider {
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TtsProfile {
+    pub synthesis_ms: u128,
+    pub playback_ms: u128,
+    pub total_ms: u128,
+}
+
+pub trait TextToSpeechProvider: Send + Sync {
     fn name(&self) -> &'static str;
     fn enabled(&self) -> bool;
     fn speak(&self, text: &str) -> anyhow::Result<()>;
+    fn speak_profiled(&self, text: &str) -> anyhow::Result<TtsProfile> {
+        let started = Instant::now();
+        self.speak(text)?;
+        Ok(TtsProfile {
+            total_ms: started.elapsed().as_millis(),
+            ..TtsProfile::default()
+        })
+    }
     fn synthesize_to_wav(&self, _text: &str, _output_path: &Path) -> anyhow::Result<()> {
         anyhow::bail!("{} does not support WAV synthesis", self.name())
     }
@@ -61,12 +77,25 @@ impl TextToSpeechProvider for PiperTtsProvider {
     }
 
     fn speak(&self, text: &str) -> anyhow::Result<()> {
+        self.speak_profiled(text).map(|_| ())
+    }
+
+    fn speak_profiled(&self, text: &str) -> anyhow::Result<TtsProfile> {
+        let total_started = Instant::now();
         let path = temporary_wav_path("piper");
-        let result = self
-            .synthesize_to_wav(text, &path)
-            .and_then(|_| play_wav(&path));
+        let synthesis_started = Instant::now();
+        let synthesis = self.synthesize_to_wav(text, &path);
+        let synthesis_ms = synthesis_started.elapsed().as_millis();
+        let playback_started = Instant::now();
+        let result = synthesis.and_then(|_| play_wav(&path));
+        let playback_ms = playback_started.elapsed().as_millis();
         let _ = std::fs::remove_file(path);
-        result
+        result?;
+        Ok(TtsProfile {
+            synthesis_ms,
+            playback_ms,
+            total_ms: total_started.elapsed().as_millis(),
+        })
     }
 
     fn synthesize_to_wav(&self, text: &str, output_path: &Path) -> anyhow::Result<()> {

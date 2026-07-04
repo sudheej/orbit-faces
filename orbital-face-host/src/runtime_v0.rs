@@ -54,6 +54,18 @@ pub enum RuntimeCommand {
     TranscribeFile(String),
     Say(String),
     SpeechStatus,
+    Remember(String),
+    Memories,
+    MemorySearch(String),
+    ForgetMemory(String),
+    MemoryStatus,
+    MemoryClearSession,
+    MemoryEnabled(bool),
+    Tools,
+    ToolInfo(String),
+    Tool { name: String, arguments: String },
+    ToolHistory(usize),
+    ToolClearSession,
     Prompt(String),
     Empty,
     Unknown(String),
@@ -61,6 +73,37 @@ pub enum RuntimeCommand {
 
 pub fn parse_command(line: &str) -> RuntimeCommand {
     let input = line.trim();
+    if let Some(text) = input.strip_prefix("/remember ") {
+        return RuntimeCommand::Remember(text.trim().to_owned());
+    }
+    if let Some(query) = input.strip_prefix("/memory-search ") {
+        return RuntimeCommand::MemorySearch(query.trim().to_owned());
+    }
+    if let Some(id) = input.strip_prefix("/forget-memory ") {
+        return RuntimeCommand::ForgetMemory(id.trim().to_owned());
+    }
+    if let Some(name) = input.strip_prefix("/tool-info ") {
+        return RuntimeCommand::ToolInfo(name.trim().to_owned());
+    }
+    if let Some(rest) = input.strip_prefix("/tool ") {
+        let (name, arguments) = rest
+            .trim()
+            .split_once(char::is_whitespace)
+            .unwrap_or((rest.trim(), ""));
+        return RuntimeCommand::Tool {
+            name: name.to_owned(),
+            arguments: arguments.trim().to_owned(),
+        };
+    }
+    if let Some(limit) = input.strip_prefix("/tool-history ") {
+        return limit
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|limit| *limit > 0)
+            .map(RuntimeCommand::ToolHistory)
+            .unwrap_or_else(|| RuntimeCommand::Unknown(input.to_owned()));
+    }
     if let Some(text) = input.strip_prefix("/attach-text ") {
         return RuntimeCommand::AttachText(text.trim().to_owned());
     }
@@ -123,6 +166,22 @@ pub fn parse_command(line: &str) -> RuntimeCommand {
         "/transcribe-file" => RuntimeCommand::TranscribeFile(String::new()),
         "/say" => RuntimeCommand::Say(String::new()),
         "/speech-status" => RuntimeCommand::SpeechStatus,
+        "/remember" => RuntimeCommand::Remember(String::new()),
+        "/memories" => RuntimeCommand::Memories,
+        "/memory-search" => RuntimeCommand::MemorySearch(String::new()),
+        "/forget-memory" => RuntimeCommand::ForgetMemory(String::new()),
+        "/memory-status" => RuntimeCommand::MemoryStatus,
+        "/memory-clear-session" => RuntimeCommand::MemoryClearSession,
+        "/memory-off" => RuntimeCommand::MemoryEnabled(false),
+        "/memory-on" => RuntimeCommand::MemoryEnabled(true),
+        "/tools" => RuntimeCommand::Tools,
+        "/tool-info" => RuntimeCommand::ToolInfo(String::new()),
+        "/tool" => RuntimeCommand::Tool {
+            name: String::new(),
+            arguments: String::new(),
+        },
+        "/tool-history" => RuntimeCommand::ToolHistory(20),
+        "/tool-clear-session" => RuntimeCommand::ToolClearSession,
         command if command.starts_with('/') => RuntimeCommand::Unknown(command.to_owned()),
         prompt => RuntimeCommand::Prompt(prompt.to_owned()),
     }
@@ -620,6 +679,39 @@ mod tests {
         );
         assert!(parse_listen_seconds("0").is_err());
         assert!(parse_listen_seconds("20").is_ok());
+    }
+
+    #[test]
+    fn parses_memory_and_tool_commands() {
+        assert_eq!(
+            parse_command("/remember Orbital is local-first"),
+            RuntimeCommand::Remember("Orbital is local-first".into())
+        );
+        assert_eq!(parse_command("/memories"), RuntimeCommand::Memories);
+        assert_eq!(
+            parse_command("/memory-search Orbital"),
+            RuntimeCommand::MemorySearch("Orbital".into())
+        );
+        assert_eq!(
+            parse_command("/forget-memory 4"),
+            RuntimeCommand::ForgetMemory("4".into())
+        );
+        assert_eq!(
+            parse_command("/tool time.now {}"),
+            RuntimeCommand::Tool {
+                name: "time.now".into(),
+                arguments: "{}".into()
+            }
+        );
+        assert_eq!(
+            parse_command("/tool-history 5"),
+            RuntimeCommand::ToolHistory(5)
+        );
+        assert_eq!(
+            parse_command("/memory-off"),
+            RuntimeCommand::MemoryEnabled(false)
+        );
+        assert_eq!(parse_command("/tools"), RuntimeCommand::Tools);
     }
 
     #[test]

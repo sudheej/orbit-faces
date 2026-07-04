@@ -48,6 +48,12 @@ can connect to the same server and sends a new `face.ready` event.
 - `/auto-listen [on|off]`: keep taking conversational turns, ending each one
   after a pause and resuming after the response.
 - `/face <name-or-directory>`: hot-reload a face pack in the connected host.
+- `/remember`, `/memories`, `/memory-search`, `/forget-memory`: explicitly
+  manage local long-term memories.
+- `/memory-status`, `/memory-clear-session`, `/memory-off`, `/memory-on`:
+  inspect and control local persistence.
+- `/tools`, `/tool-info`, `/tool`, `/tool-history`, `/tool-clear-session`:
+  inspect, execute, and audit local tools.
 - `/transcribe-file <path>`: transcribe a WAV without asking the model.
 - `/say <text>`: invoke the selected TTS provider.
 - `/speech-status`: print speech provider configuration and recent results.

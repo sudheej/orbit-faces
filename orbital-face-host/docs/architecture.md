@@ -28,12 +28,19 @@
     preservation; `hotkeys.rs` isolates optional Windows global shortcuts.
 13. `speech/` isolates bounded CPAL microphone capture, mock/whisper.cpp STT,
     and none/Piper/Windows-SAPI TTS providers.
+14. `memory/` owns local SQLite migrations and persistence behind the
+    `MemoryStore` trait.
+15. `tools/` owns the local-only registry, schemas, permission policy,
+    built-in executor, and model-suggestion validation.
 
 ## Boundaries
 
 Face scripts receive state and draw. They do not own IO, networking, tools,
 voice, agents, or application lifecycle. The bridge remains a host-level
 transport.
+
+`orbital-runtime` owns models, context, speech, memory, tool permissions,
+terminal confirmation, and audit. `orbital-face-host` remains visual-only.
 
 Windowing is platform-specific because transparent click-through, focus,
 positioning, and stacking are not portable desktop concepts. Drawing, face

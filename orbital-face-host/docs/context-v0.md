@@ -113,5 +113,6 @@ Collection commands use short visual states:
 - Context is in memory for the current runtime process only.
 - Clipboard snapshots do not update automatically.
 - Watch mode is metadata-only and Windows-only in v0.
-- There is no screenshot capture, OCR, indexing, persistent memory, tools,
-  MCP, or autonomous context collection.
+- There is no screenshot capture, OCR, vector indexing, MCP, or autonomous
+  context collection. Explicit local memory and read-only tools are documented
+  separately.

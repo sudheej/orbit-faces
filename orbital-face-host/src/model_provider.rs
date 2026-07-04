@@ -1,12 +1,14 @@
 use crate::speech::SpeechOptions;
+use crate::tools::ToolSuggestion;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434";
 pub const DEFAULT_OLLAMA_MODEL: &str = "qwen2.5:1.5b";
-pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Orbital, a concise local desktop companion. Reply in short, useful answers. Prefer 1-3 sentences unless the user asks for detail. You are running through a small desktop face, so keep captions compact.";
+pub const DEFAULT_SYSTEM_PROMPT: &str = "You are an ongoing personal companion. No fixed personality, species, or role is imposed; develop a consistent, natural relationship with the user from the configured identity and your shared history. Speak conversationally and keep most replies to 1-3 sentences unless the user asks for detail.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeModelOptions {
@@ -15,6 +17,11 @@ pub struct RuntimeModelOptions {
     pub ollama_base_url: String,
     pub system_prompt: String,
     pub enable_hotkeys: bool,
+    pub enable_model_tools: bool,
+    pub enable_model_thinking: bool,
+    pub db_path: Option<std::path::PathBuf>,
+    pub store_session_messages: bool,
+    pub store_context_items: bool,
     pub speech: SpeechOptions,
 }
 
@@ -26,6 +33,11 @@ impl Default for RuntimeModelOptions {
             ollama_base_url: DEFAULT_OLLAMA_BASE_URL.into(),
             system_prompt: DEFAULT_SYSTEM_PROMPT.into(),
             enable_hotkeys: false,
+            enable_model_tools: false,
+            enable_model_thinking: false,
+            db_path: None,
+            store_session_messages: false,
+            store_context_items: false,
             speech: SpeechOptions::default(),
         }
     }
@@ -62,6 +74,17 @@ impl RuntimeModelOptions {
                         .ok_or_else(|| anyhow::anyhow!("--system-prompt requires text"))?;
                 }
                 "--enable-hotkeys" => options.enable_hotkeys = true,
+                "--enable-model-tools" => options.enable_model_tools = true,
+                "--enable-model-thinking" => options.enable_model_thinking = true,
+                "--db-path" => {
+                    options.db_path = Some(
+                        args.next()
+                            .map(Into::into)
+                            .ok_or_else(|| anyhow::anyhow!("--db-path requires a path"))?,
+                    );
+                }
+                "--store-session-messages" => options.store_session_messages = true,
+                "--store-context-items" => options.store_context_items = true,
                 "--stt" => {
                     options.speech.stt = args
                         .next()
@@ -165,6 +188,14 @@ pub struct ModelChunk {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolPlanningRequest {
+    pub user_input: String,
+    pub tool_names: Vec<String>,
+    pub tool_schemas: Vec<(String, Value)>,
+    pub tool_descriptions: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderStatus {
     pub reachable: bool,
     pub model_available: Option<bool>,
@@ -178,6 +209,12 @@ pub trait ModelProvider {
         None
     }
     fn status(&self) -> ProviderStatus;
+    fn suggest_tool(
+        &self,
+        _request: &ToolPlanningRequest,
+    ) -> anyhow::Result<Option<ToolSuggestion>> {
+        Ok(None)
+    }
     fn generate(&self, request: ModelRequest) -> anyhow::Result<ModelResponse> {
         self.generate_streaming(request, &mut |_| {})
     }
@@ -206,6 +243,28 @@ impl ModelProvider for MockModelProvider {
             model_available: Some(true),
             detail: "deterministic in-process provider".into(),
         }
+    }
+
+    fn suggest_tool(
+        &self,
+        request: &ToolPlanningRequest,
+    ) -> anyhow::Result<Option<ToolSuggestion>> {
+        let normalized = request.user_input.to_ascii_lowercase();
+        if normalized.contains("search memory") {
+            let query = request
+                .user_input
+                .split_once("for ")
+                .map(|(_, query)| query)
+                .map(|query| query.split_once(" and ").map_or(query, |(query, _)| query))
+                .map(|query| query.trim().trim_end_matches(['.', '?']))
+                .filter(|query| !query.is_empty())
+                .unwrap_or(request.user_input.trim());
+            return Ok(Some(ToolSuggestion {
+                tool: "memory.search".into(),
+                arguments: serde_json::json!({"query":query}),
+            }));
+        }
+        Ok(None)
     }
 
     fn generate_streaming(
@@ -288,6 +347,7 @@ pub struct OllamaModelProvider {
     model: String,
     agent: ureq::Agent,
     health_agent: ureq::Agent,
+    enable_thinking: bool,
 }
 
 impl OllamaModelProvider {
@@ -312,7 +372,13 @@ impl OllamaModelProvider {
             model,
             agent,
             health_agent,
+            enable_thinking: false,
         })
+    }
+
+    pub fn with_thinking(mut self, enabled: bool) -> Self {
+        self.enable_thinking = enabled;
+        self
     }
 
     fn endpoint(&self, path: &str) -> String {
@@ -371,6 +437,80 @@ impl ModelProvider for OllamaModelProvider {
         }
     }
 
+    fn suggest_tool(
+        &self,
+        request: &ToolPlanningRequest,
+    ) -> anyhow::Result<Option<ToolSuggestion>> {
+        let planner_prompt = "Call at most one tool only when it must run to satisfy the request. Do not call tools for conversation, capability questions, tool-history questions, unclear requests, or unsupported actions. Never claim execution. Tool results require runtime approval."
+            .to_owned();
+        let messages = vec![
+            ModelMessage {
+                role: "system".into(),
+                content: planner_prompt,
+            },
+            ModelMessage {
+                role: "user".into(),
+                content: request.user_input.clone(),
+            },
+        ];
+        let tools = request
+            .tool_schemas
+            .iter()
+            .map(|(name, parameters)| OllamaTool {
+                r#type: "function",
+                function: OllamaToolFunction {
+                    name: name.clone(),
+                    description: request
+                        .tool_descriptions
+                        .iter()
+                        .find(|(candidate, _)| candidate == name)
+                        .map(|(_, description)| description.clone())
+                        .unwrap_or_else(|| name.clone()),
+                    parameters: parameters.clone(),
+                },
+            })
+            .collect::<Vec<_>>();
+        let body = OllamaToolChatRequest {
+            model: &self.model,
+            messages: &messages,
+            tools: &tools,
+            stream: false,
+            think: false,
+            options: OllamaOptions {
+                num_predict: Some(128),
+                temperature: Some(0.0),
+            },
+        };
+        let mut response = self
+            .agent
+            .post(self.endpoint("chat"))
+            .send_json(&body)
+            .context("Ollama tool planner request failed")?;
+        let response = response
+            .body_mut()
+            .read_json::<OllamaChatChunk>()
+            .context("invalid Ollama tool planner response")?;
+        if let Some(error) = response.error {
+            anyhow::bail!("Ollama tool planner error: {error}");
+        }
+        if response.message.tool_calls.is_empty() {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            response.message.tool_calls.len() == 1,
+            "Ollama proposed more than one tool; v0 allows one"
+        );
+        let call = &response.message.tool_calls[0].function;
+        anyhow::ensure!(
+            request.tool_names.iter().any(|name| name == &call.name),
+            "Ollama tool planner selected an unknown tool"
+        );
+        Ok(Some(ToolSuggestion {
+            tool: call.name.clone(),
+            arguments: call.arguments.clone(),
+        }))
+    }
+
     fn generate_streaming(
         &self,
         request: ModelRequest,
@@ -395,6 +535,7 @@ impl ModelProvider for OllamaModelProvider {
             model: &self.model,
             messages: &messages,
             stream: true,
+            think: self.enable_thinking,
             options: OllamaOptions {
                 num_predict: request.max_tokens,
                 temperature: request.temperature,
@@ -476,7 +617,31 @@ struct OllamaChatRequest<'a> {
     model: &'a str,
     messages: &'a [ModelMessage],
     stream: bool,
+    think: bool,
     options: OllamaOptions,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaToolChatRequest<'a> {
+    model: &'a str,
+    messages: &'a [ModelMessage],
+    tools: &'a [OllamaTool],
+    stream: bool,
+    think: bool,
+    options: OllamaOptions,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaTool {
+    r#type: &'static str,
+    function: OllamaToolFunction,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaToolFunction {
+    name: String,
+    description: String,
+    parameters: Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -501,6 +666,20 @@ struct OllamaChatChunk {
 struct OllamaMessage {
     #[serde(default)]
     content: String,
+    #[serde(default)]
+    tool_calls: Vec<OllamaToolCall>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaToolCall {
+    function: OllamaToolCallFunction,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaToolCallFunction {
+    name: String,
+    #[serde(default)]
+    arguments: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -554,6 +733,43 @@ mod tests {
             serde_json::from_str::<ModelResponse>(&json).unwrap(),
             response
         );
+    }
+
+    #[test]
+    fn ollama_tool_channel_keeps_calls_out_of_content() {
+        let messages = vec![ModelMessage {
+            role: "user".into(),
+            content: "What time is it?".into(),
+        }];
+        let tools = vec![OllamaTool {
+            r#type: "function",
+            function: OllamaToolFunction {
+                name: "time.now".into(),
+                description: "Return local time".into(),
+                parameters: serde_json::json!({"type":"object"}),
+            },
+        }];
+        let request = OllamaToolChatRequest {
+            model: "test",
+            messages: &messages,
+            tools: &tools,
+            stream: false,
+            think: false,
+            options: OllamaOptions {
+                num_predict: Some(128),
+                temperature: Some(0.0),
+            },
+        };
+        let json = serde_json::to_value(request).unwrap();
+        assert_eq!(json["tools"][0]["function"]["name"], "time.now");
+
+        let response: OllamaChatChunk = serde_json::from_value(serde_json::json!({
+            "message": {"content":"", "tool_calls":[{"function":{"name":"time.now","arguments":{}}}]},
+            "done": true
+        }))
+        .unwrap();
+        assert!(response.message.content.is_empty());
+        assert_eq!(response.message.tool_calls[0].function.name, "time.now");
     }
 
     #[test]
@@ -619,6 +835,10 @@ mod tests {
         assert_eq!(options.provider, "mock");
         assert_eq!(options.ollama_model, "qwen2.5:1.5b");
         assert!(!options.enable_hotkeys);
+        assert!(!options.enable_model_tools);
+        assert!(!options.enable_model_thinking);
+        assert!(options.db_path.is_none());
+        assert!(!options.store_session_messages);
         assert_eq!(options.speech.stt, "mock");
         assert_eq!(options.speech.tts, "none");
     }
@@ -635,6 +855,12 @@ mod tests {
             "--system-prompt",
             "Be brief.",
             "--enable-hotkeys",
+            "--enable-model-tools",
+            "--enable-model-thinking",
+            "--db-path",
+            "./orbital.db",
+            "--store-session-messages",
+            "--store-context-items",
             "--stt",
             "whisper",
             "--whisper-model-path",
@@ -653,6 +879,14 @@ mod tests {
         assert_eq!(options.ollama_base_url, "http://127.0.0.1:11434");
         assert_eq!(options.system_prompt, "Be brief.");
         assert!(options.enable_hotkeys);
+        assert!(options.enable_model_tools);
+        assert!(options.enable_model_thinking);
+        assert_eq!(
+            options.db_path.as_deref(),
+            Some(std::path::Path::new("./orbital.db"))
+        );
+        assert!(options.store_session_messages);
+        assert!(options.store_context_items);
         assert_eq!(options.speech.stt, "whisper");
         assert_eq!(
             options.speech.whisper_model_path.as_deref(),
@@ -673,5 +907,20 @@ mod tests {
         let response = MockModelProvider.generate(request).unwrap();
         assert!(response.text.contains("1 selected_text context item"));
         assert!(response.text.contains("missing class Foo"));
+    }
+
+    #[test]
+    fn mock_provider_can_emit_explicit_tool_test_hook() {
+        let suggestion = MockModelProvider
+            .suggest_tool(&ToolPlanningRequest {
+                user_input: "Search memory for Orbital and summarize it.".into(),
+                tool_names: vec!["memory.search".into()],
+                tool_schemas: vec![("memory.search".into(), serde_json::json!({"type":"object"}))],
+                tool_descriptions: vec![("memory.search".into(), "Search memory".into())],
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(suggestion.tool, "memory.search");
+        assert_eq!(suggestion.arguments["query"], "Orbital");
     }
 }
